@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, date, timedelta
+import asyncio
 import numpy as np
 
 from models import (
@@ -187,20 +188,43 @@ async def volatility_analysis(req: VolatilityRequest):
             lookup_date -= timedelta(days=1)
         lookup_date_str = lookup_date.strftime("%Y-%m-%d")
 
-        # Batch process — rate limit awareness (free tier: 5/min)
-        bars_cache: dict = {}  # option_ticker -> bar dict (for reprocessing)
-        for contract in contracts:
-            try:
-                bar = await fetch_option_daily_bar(req.api_key, contract.ticker, lookup_date_str)
-                if bar:
-                    bars_cache[contract.ticker] = bar
-                market_price = bar["close"] if bar else None
+        # Batched processing — respect Polygon free tier (5 req/min)
+        BATCH_SIZE = 5
+        BATCH_DELAY = 13  # seconds between batches (60s / 5 = 12s + 1s buffer)
+        bars_cache: dict = {}
+        no_bar = 0
+        no_price = 0
+        no_iv = 0
+        errors = 0
+        total = len(contracts)
+        num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
 
-                bid, ask, oi, vol = None, None, None, None
-                if bar:
-                    vol = bar.get("volume", 0)
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * BATCH_SIZE
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch = contracts[batch_start:batch_end]
 
-                if market_price and market_price > 0:
+            print(f"[VOL] {req.ticker}: batch {batch_idx + 1}/{num_batches} — "
+                  f"contracts {batch_start + 1}-{batch_end}/{total}")
+
+            for contract in batch:
+                try:
+                    bar = await fetch_option_daily_bar(req.api_key, contract.ticker, lookup_date_str)
+                    if bar:
+                        bars_cache[contract.ticker] = bar
+                    else:
+                        no_bar += 1
+                        continue
+                    market_price = bar["close"] if bar else None
+
+                    bid, ask, oi, vol = None, None, None, None
+                    if bar:
+                        vol = bar.get("volume", 0)
+
+                    if not (market_price and market_price > 0):
+                        no_price += 1
+                        continue
+
                     enriched = enrich_contract(
                         contract=contract,
                         spot=spot,
@@ -215,11 +239,26 @@ async def volatility_analysis(req: VolatilityRequest):
                     )
                     if enriched.implied_volatility and enriched.implied_volatility > 0:
                         enriched_chain.append(enriched)
-            except Exception:
-                continue  # Skip contracts that fail
+                    else:
+                        no_iv += 1
+                except Exception as exc:
+                    errors += 1
+                    continue
+
+            # Wait between batches (skip after last batch)
+            if batch_idx < num_batches - 1:
+                await asyncio.sleep(BATCH_DELAY)
+
+        print(f"[VOL] {req.ticker}: {total} contracts, "
+              f"{len(bars_cache)} had bars, "
+              f"{no_bar} no bar, {no_price} no price, {no_iv} no IV, {errors} errors → "
+              f"{len(enriched_chain)} enriched")
 
         # ── Step 4: Build IV surface and metrics ──
         surface_points = build_iv_surface(enriched_chain)
+        print(f"[VOL] {req.ticker}: {len(surface_points)} surface points, "
+              f"{len(set(p.expiry_days for p in surface_points))} unique expiries, "
+              f"{len(set(p.moneyness for p in surface_points))} unique strikes")
         atm_iv_near = compute_atm_iv(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
         atm_iv_far = compute_atm_iv(enriched_chain, req.far_expiry_min_days, req.far_expiry_max_days)
         skew_25d = compute_put_call_skew(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)

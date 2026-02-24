@@ -49,8 +49,8 @@ price-distribution-tool/
 - **Naked option max-loss** — Corrected from arbitrary `3× credit` to proper theoretical values (unlimited for calls, `strike × 100 − credit` for puts)
 - **Pagination fix** — Polygon pagination no longer sends duplicate `apiKey` query params
 - **GMM component stats** — Skewness/kurtosis now use theoretical Gaussian values (0.0) instead of noisy random sampling
-- **GMM vol display** — Summary now shows price-space dispersion as `$5.63` instead of incorrectly formatting as `563.00%`
-- **IV Surface chart** — Switched from Plotly `surface` (requires perfect 2D grid) to `mesh3d` (Delaunay triangulation handles sparse option data)
+- **GMM vol display** — Backend summary and frontend metric card now show price-space dispersion as `$5.63` instead of `5802.0%`
+- **IV Surface chart** — Uses `surface` with `connectgaps: true` for dense data, falls back to `scatter3d` markers for sparse chains (e.g. GOOG on free tier)
 - **Return type hint** — `build_distributions` type hint corrected to match 6-item return
 
 ### Data Caching & Reprocessing
@@ -58,6 +58,8 @@ price-distribution-tool/
 - **Instant parameter tweaking** — After running vol analysis, change risk-free rate or dividend yield and click **⟳ Reprocess (cached)** to recompute greeks, IV, and signals without re-fetching from Polygon
 - **New `/volatility/reprocess` endpoint** — Accepts cached contracts + bars, skips all API calls
 - **Save / Load cache** — **↓ Save** exports all session data (candles, analysis, contracts, bars, vol results) as a JSON file. **↑ Load** restores it instantly — all tabs (DATA, VOL, SIGNALS, CHARTS) repopulate without any API calls
+- **Rate-limited batching** — Option bar fetching now processes 5 contracts per batch with 13s delays, respecting Polygon free tier (5 req/min). Progress logged to backend terminal
+- **Debug info bar** — VOL tab shows surface point count, unique strikes/expiries, and chain size for troubleshooting
 - **Frontend caching** — Raw option data stored in React state for instant reuse
 
 ## Features

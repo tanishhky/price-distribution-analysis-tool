@@ -21,7 +21,7 @@ export default function VolatilityPanel({ volData, height = 380 }) {
           color={va.iv_term_structure === 'backwardation' ? '#ef4444' : '#3b82f6'} />
         <MetricCard label="25Δ SKEW" value={fmt_pct(va.put_call_skew_25d)}
           color={va.put_call_skew_25d > 0.03 ? '#ef4444' : '#22c55e'} />
-        <MetricCard label="GMM VOL" value={fmt_pct(va.gmm_weighted_vol)} color="#a78bfa" />
+        <MetricCard label="GMM VOL" value={va.gmm_weighted_vol != null ? `$${va.gmm_weighted_vol.toFixed(2)}` : 'N/A'} color="#a78bfa" />
         <MetricCard label="GMM KURT" value={va.gmm_weighted_kurtosis?.toFixed(2) || 'N/A'} color="#a78bfa" />
       </div>
 
@@ -37,10 +37,30 @@ export default function VolatilityPanel({ volData, height = 380 }) {
         </div>
       </div>
 
+      {/* Debug info bar */}
+      <div style={{ padding: '6px 12px', background: '#111318', borderBottom: '1px solid #1a1d25', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: '#4b5563' }}>
+          Surface pts: <span style={{ color: (va.surface_points?.length || 0) > 3 ? '#22c55e' : '#ef4444' }}>{va.surface_points?.length || 0}</span>
+        </span>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: '#4b5563' }}>
+          Unique strikes: {va.surface_points ? [...new Set(va.surface_points.map(p => p.moneyness))].length : 0}
+        </span>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: '#4b5563' }}>
+          Unique expiries: {va.surface_points ? [...new Set(va.surface_points.map(p => p.expiry_days))].length : 0}
+        </span>
+        <span style={{ fontSize: 10, fontFamily: MONO, color: '#4b5563' }}>
+          Chain: {va.chain?.length || 0} contracts
+        </span>
+      </div>
+
       {/* IV Surface 3D */}
-      {va.surface_points?.length > 10 && (
+      {va.surface_points?.length > 3 ? (
         <div style={S.fullWidth}>
           <IVSurface3D surface={va.surface_points} height={440} />
+        </div>
+      ) : (
+        <div style={{ padding: '12px 16px', fontSize: 11, fontFamily: MONO, color: '#6b7280', borderBottom: '1px solid #1a1d25' }}>
+          ⚠ IV Surface needs &gt;3 data points (got {va.surface_points?.length || 0}). Try increasing strike range or checking if contracts had valid bars.
         </div>
       )}
 
@@ -105,10 +125,10 @@ function IVSmileChart({ surface, spot, height }) {
 }
 
 function VolCompareChart({ va, height }) {
-  const labels = ['RV 10d', 'RV 20d', 'RV 30d', 'RV 60d', 'GMM Vol', 'ATM IV Near', 'ATM IV Far']
+  const labels = ['RV 10d', 'RV 20d', 'RV 30d', 'RV 60d', 'ATM IV Near', 'ATM IV Far']
   const vals = [va.realized_vol_10d, va.realized_vol_20d, va.realized_vol_30d, va.realized_vol_60d,
-  va.gmm_weighted_vol, va.atm_iv_near, va.atm_iv_far]
-  const colors = ['#22c55e', '#22c55e', '#22c55e', '#22c55e', '#a78bfa', '#f59e0b', '#f59e0b']
+  va.atm_iv_near, va.atm_iv_far]
+  const colors = ['#22c55e', '#22c55e', '#22c55e', '#22c55e', '#f59e0b', '#f59e0b']
 
   const filteredLabels = [], filteredVals = [], filteredColors = []
   for (let i = 0; i < vals.length; i++) {
@@ -136,34 +156,65 @@ function VolCompareChart({ va, height }) {
 }
 
 function IVSurface3D({ surface, height }) {
-  // Use flat arrays for mesh3d instead of building a sparse 2D grid
-  const xData = surface.map(p => p.moneyness)
-  const yData = surface.map(p => p.expiry_days)
-  const zData = surface.map(p => p.iv * 100)
+  const strikes = [...new Set(surface.map(p => p.moneyness))].sort((a, b) => a - b)
+  const expiries = [...new Set(surface.map(p => p.expiry_days))].sort((a, b) => a - b)
 
+  const sceneLayout = {
+    xaxis: { title: 'Moneyness', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
+    yaxis: { title: 'DTE', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
+    zaxis: { title: 'IV %', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
+    bgcolor: '#0a0b0d',
+    camera: { eye: { x: 1.6, y: -1.6, z: 0.8 } },
+  }
+
+  // Need at least 2 unique expiries AND 2 unique strikes for a surface grid
+  if (strikes.length >= 2 && expiries.length >= 2) {
+    const zData = expiries.map(exp =>
+      strikes.map(strike => {
+        const pt = surface.find(p => p.moneyness === strike && p.expiry_days === exp)
+        return pt ? pt.iv * 100 : null
+      })
+    )
+    return (
+      <Plot data={[{
+        type: 'surface',
+        x: strikes, y: expiries, z: zData,
+        connectgaps: true,
+        colorscale: [[0, '#0a0b0d'], [0.25, '#1e3a5f'], [0.5, '#3b82f6'], [0.75, '#f59e0b'], [1, '#ef4444']],
+        showscale: true,
+        colorbar: {
+          title: { text: 'IV %', font: { color: '#9ca3af', size: 10, family: MONO } },
+          tickfont: { color: '#6b7280', size: 9 }
+        },
+        hovertemplate: 'Moneyness: %{x:.3f}<br>DTE: %{y}d<br>IV: %{z:.1f}%<extra></extra>',
+      }]} layout={{
+        ...darkLayout('Implied Volatility Surface'),
+        scene: sceneLayout,
+        margin: { l: 0, r: 0, t: 35, b: 0 },
+      }} config={plotConfig} style={{ width: '100%', height }} useResizeHandler />
+    )
+  }
+
+  // Fallback: scatter3d for sparse data that can't form a grid
+  const ivPct = surface.map(p => p.iv * 100)
   return (
     <Plot data={[{
-      type: 'mesh3d', // Changed from 'surface'
-      x: xData,
-      y: yData,
-      z: zData,
-      intensity: zData, // Determines the color mapping
-      colorscale: [[0, '#0a0b0d'], [0.25, '#1e3a5f'], [0.5, '#3b82f6'], [0.75, '#f59e0b'], [1, '#ef4444']],
-      showscale: true,
-      colorbar: {
-        title: { text: 'IV %', font: { color: '#9ca3af', size: 10, family: MONO } },
-        tickfont: { color: '#6b7280', size: 9 }
+      type: 'scatter3d', mode: 'markers',
+      x: surface.map(p => p.moneyness),
+      y: surface.map(p => p.expiry_days),
+      z: ivPct,
+      marker: {
+        size: 4, color: ivPct, colorscale: [[0, '#1e3a5f'], [0.5, '#3b82f6'], [1, '#ef4444']],
+        showscale: true,
+        colorbar: {
+          title: { text: 'IV %', font: { color: '#9ca3af', size: 10, family: MONO } },
+          tickfont: { color: '#6b7280', size: 9 }
+        },
       },
       hovertemplate: 'Moneyness: %{x:.3f}<br>DTE: %{y}d<br>IV: %{z:.1f}%<extra></extra>',
     }]} layout={{
-      ...darkLayout('Implied Volatility Surface'),
-      scene: {
-        xaxis: { title: 'Moneyness', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
-        yaxis: { title: 'DTE', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
-        zaxis: { title: 'IV %', color: '#9ca3af', gridcolor: '#1a1d25', backgroundcolor: '#0a0b0d' },
-        bgcolor: '#0a0b0d',
-        camera: { eye: { x: 1.6, y: -1.6, z: 0.8 } },
-      },
+      ...darkLayout('Implied Volatility (Scatter — sparse data)'),
+      scene: sceneLayout,
       margin: { l: 0, r: 0, t: 35, b: 0 },
     }} config={plotConfig} style={{ width: '100%', height }} useResizeHandler />
   )
