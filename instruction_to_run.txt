@@ -1,0 +1,15 @@
+# Install dependencies (one-time)
+cd /Users/tanishkyadav/Documents/price-distribution-tool/backend
+pip3 install -r requirements.txt
+
+# Start the server
+python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+
+
+# Install dependencies (one-time)
+cd /Users/tanishkyadav/Documents/price-distribution-tool/frontend
+npm install
+
+# Start the dev server
+npm run dev
