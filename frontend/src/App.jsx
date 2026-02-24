@@ -7,7 +7,7 @@ import ComparisonChart from './components/ComparisonChart'
 import ResultsPanel from './components/ResultsPanel'
 import VolatilityPanel from './components/VolatilityPanel'
 import SignalsPanel from './components/SignalsPanel'
-import { fetchCandles, analyzeData, runVolatilityAnalysis } from './api'
+import { fetchCandles, analyzeData, runVolatilityAnalysis, reprocessVolatility } from './api'
 
 const H = 340
 
@@ -20,10 +20,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('charts')
   // Store params for vol analysis
   const [lastParams, setLastParams] = useState(null)
+  // Cached data for reprocessing
+  const [cachedContracts, setCachedContracts] = useState(null)
+  const [cachedBars, setCachedBars] = useState(null)
 
-  const setErr  = (msg) => setStatus({ type: 'error',   message: msg })
-  const setInfo = (msg) => setStatus({ type: 'info',    message: msg })
-  const setOk   = (msg) => setStatus({ type: 'success', message: msg })
+  const setErr = (msg) => setStatus({ type: 'error', message: msg })
+  const setInfo = (msg) => setStatus({ type: 'info', message: msg })
+  const setOk = (msg) => setStatus({ type: 'success', message: msg })
 
   const handleFetchAndAnalyze = async (params) => {
     setLoading(true)
@@ -70,9 +73,44 @@ export default function App() {
         strike_range_pct: volParams.strike_range_pct,
       })
       setVolData(result)
+      // Cache the raw data for reprocessing
+      setCachedContracts(result.cached_contracts || null)
+      setCachedBars(result.cached_bars || null)
       const nSignals = result.trade_signals?.length || 0
       const nContracts = result.volatility_analysis?.chain?.length || 0
       setOk(`Vol analysis complete — ${nContracts} contracts, ${nSignals} signals`)
+      setActiveTab('volatility')
+    } catch (err) { setErr(err.message) }
+    finally { setLoading(false) }
+  }
+
+  const handleReprocess = async (reprocessParams) => {
+    if (!candles || !analysis || !cachedContracts || !cachedBars) {
+      return setErr('No cached data available. Run Vol Analysis first.')
+    }
+    setLoading(true)
+    setVolData(null)
+    try {
+      setInfo('Reprocessing with updated parameters (no API calls)…')
+      const spot = candles[candles.length - 1].close
+      const result = await reprocessVolatility({
+        ticker: analysis.ticker,
+        candles: candles,
+        spot_price: spot,
+        timeframe: lastParams?.fetchResult?.timeframe || '1day',
+        gmm_d2: analysis.gmm_d2,
+        risk_free_rate: reprocessParams.risk_free_rate,
+        dividend_yield: reprocessParams.dividend_yield,
+        strike_range_pct: reprocessParams.strike_range_pct,
+        cached_contracts: cachedContracts,
+        cached_bars: cachedBars,
+      })
+      setVolData(result)
+      setCachedContracts(result.cached_contracts || cachedContracts)
+      setCachedBars(result.cached_bars || cachedBars)
+      const nSignals = result.trade_signals?.length || 0
+      const nContracts = result.volatility_analysis?.chain?.length || 0
+      setOk(`Reprocessed — ${nContracts} contracts, ${nSignals} signals (no API calls)`)
       setActiveTab('volatility')
     } catch (err) { setErr(err.message) }
     finally { setLoading(false) }
@@ -88,7 +126,14 @@ export default function App() {
 
   return (
     <div style={S.root}>
-      <Controls onFetchAndAnalyze={handleFetchAndAnalyze} onRunVolatility={handleRunVolatility} loading={loading} status={status} />
+      <Controls
+        onFetchAndAnalyze={handleFetchAndAnalyze}
+        onRunVolatility={handleRunVolatility}
+        onReprocess={handleReprocess}
+        hasVolCache={!!(cachedContracts && cachedBars)}
+        loading={loading}
+        status={status}
+      />
 
       <div style={S.main}>
         {/* Tab bar */}
@@ -171,20 +216,20 @@ export default function App() {
                 volData
                   ? <VolatilityPanel volData={volData} />
                   : <div style={S.placeholder}>
-                      <div style={S.placeholderIcon}>◈</div>
-                      <div style={S.placeholderTitle}>Run Vol Analysis</div>
-                      <div style={S.placeholderSub}>Click "◈ Run Vol Analysis" in the sidebar to compute IV surface, greeks, and trade signals</div>
-                    </div>
+                    <div style={S.placeholderIcon}>◈</div>
+                    <div style={S.placeholderTitle}>Run Vol Analysis</div>
+                    <div style={S.placeholderSub}>Click "◈ Run Vol Analysis" in the sidebar to compute IV surface, greeks, and trade signals</div>
+                  </div>
               )}
 
               {activeTab === 'signals' && (
                 volData
                   ? <SignalsPanel signals={volData.trade_signals} summaryText={volData.summary_text} />
                   : <div style={S.placeholder}>
-                      <div style={S.placeholderIcon}>⚡</div>
-                      <div style={S.placeholderTitle}>No Signals Yet</div>
-                      <div style={S.placeholderSub}>Run volatility analysis to generate trade signals</div>
-                    </div>
+                    <div style={S.placeholderIcon}>⚡</div>
+                    <div style={S.placeholderTitle}>No Signals Yet</div>
+                    <div style={S.placeholderSub}>Run volatility analysis to generate trade signals</div>
+                  </div>
               )}
 
               {activeTab === 'results' && (

@@ -1,4 +1,4 @@
-# ◈ VolEdge — Volatility Trading System v2.0
+# ◈ VolEdge — Volatility Trading System v2.1
 
 A full-stack quantitative trading platform that combines **price distribution analysis** (GMM)
 with **options volatility analysis** and **automated trade signal generation**.
@@ -23,7 +23,7 @@ price-distribution-tool/
 │   │   ├── App.jsx
 │   │   ├── api.js
 │   │   └── components/
-│   │       ├── Controls.jsx          # Sidebar with all params
+│   │       ├── Controls.jsx          # Sidebar with all params + reprocess
 │   │       ├── CandlestickChart.jsx  # OHLCV + volume
 │   │       ├── DistributionChart.jsx # D1/D2 histogram + KDE
 │   │       ├── GMMChart.jsx          # GMM decomposition
@@ -37,13 +37,35 @@ price-distribution-tool/
 └── README.md
 ```
 
-## What's New in v2.0
+## What's New in v2.1
+
+### Bug Fixes & Correctness Improvements
+
+- **Black-Scholes theta** — Fixed sign errors in both call and put theta for dividend-paying stocks
+- **Timeframe-aware annualization** — Realized vol now uses correct `sqrt(N)` factor for any timeframe (1min through 1week), not just daily
+- **Window lookback** — "RV 10d" now correctly converts day-based windows to candle counts (e.g. 10 days × 6.5 = 65 hourly candles)
+- **Weekend/holiday crash** — Option bar lookup now walks backwards to find last trading day instead of hardcoding "yesterday"
+- **Options chain completeness** — Raised contract fetch limit from 250 to 1000 to capture the full chain for liquid assets like SPY
+- **Naked option max-loss** — Corrected from arbitrary `3× credit` to proper theoretical values (unlimited for calls, `strike × 100 − credit` for puts)
+- **Pagination fix** — Polygon pagination no longer sends duplicate `apiKey` query params
+- **GMM component stats** — Skewness/kurtosis now use theoretical Gaussian values (0.0) instead of noisy random sampling
+- **GMM vol labeling** — Clearly documented as price-space std dev (not comparable to IV/RV)
+- **Return type hint** — `build_distributions` type hint corrected to match 6-item return
+
+### Data Caching & Reprocessing
+
+- **Instant parameter tweaking** — After running vol analysis, change risk-free rate or dividend yield and click **⟳ Reprocess (cached)** to recompute greeks, IV, and signals without re-fetching from Polygon
+- **New `/volatility/reprocess` endpoint** — Accepts cached contracts + bars, skips all API calls
+- **Frontend caching** — Raw option data stored in React state for instant reuse
+
+## Features
 
 ### Volatility Engine (self-computed, no paid tier needed)
 - **Black-Scholes pricing** — full implementation with continuous dividends
 - **Implied Volatility** — Brent root-finding on BS model
 - **Greeks** — Delta, Gamma, Theta, Vega, Rho computed analytically
 - **Parkinson volatility** — high-low estimator (more efficient than close-to-close)
+- **Multi-timeframe annualization** — correct factors for 1min through 1week candles
 
 ### Options Chain Analysis
 - Fetches all active contracts from Polygon reference endpoint
@@ -100,16 +122,18 @@ npm run dev
 3. Set date range and timeframe
 4. Click **▶ Fetch & Analyze** — runs GMM distribution analysis
 5. Click **◈ Run Vol Analysis** — fetches options chain, computes IV surface, generates signals
-6. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA
+6. Tweak risk-free rate or dividend yield → click **⟳ Reprocess (cached)** for instant results
+7. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA
 
 ## API Endpoints
 
 ```
-GET  /health                → Health check
-GET  /supported-intervals   → Valid timeframes
-POST /fetch                 → Fetch OHLCV from Polygon
-POST /analyze               → GMM distribution analysis
-POST /volatility            → Full volatility + options + signals pipeline
+GET  /health                   → Health check
+GET  /supported-intervals      → Valid timeframes
+POST /fetch                    → Fetch OHLCV from Polygon
+POST /analyze                  → GMM distribution analysis
+POST /volatility               → Full volatility + options + signals pipeline
+POST /volatility/reprocess     → Reprocess with cached data (no API calls)
 ```
 
 ## Limitations & Notes
@@ -123,6 +147,9 @@ POST /volatility            → Full volatility + options + signals pipeline
   They are NOT investment advice. Always validate with your own research and risk management.
 - **Volume**: Some option contracts have very low volume. The system filters out contracts
   where IV cannot be reliably computed.
+- **Weekend/holiday handling**: The system skips weekends when looking up option bars.
+  Market holidays are not explicitly handled — if the most recent weekday was a holiday,
+  the bar lookup may still return empty for some contracts.
 
 ## Disclaimer
 

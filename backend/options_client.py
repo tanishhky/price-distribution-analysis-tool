@@ -61,8 +61,10 @@ async def fetch_options_contracts(
 
             next_url = data.get("next_url")
             if next_url and len(contracts) < limit:
+                # next_url already contains all query params including apiKey;
+                # clear params to avoid sending duplicate query parameters.
                 url = next_url
-                params = {"apiKey": api_key}
+                params = {}
                 pages += 1
             else:
                 url = None

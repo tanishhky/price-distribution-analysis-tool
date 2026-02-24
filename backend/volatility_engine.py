@@ -64,19 +64,22 @@ def bs_gamma(S, K, T, r, q, sigma):
 
 
 def bs_theta(S, K, T, r, q, sigma, cp):
+    """Black-Scholes theta (per calendar day).
+    Standard formulas:
+      Call: -[S·e^(-qT)·N'(d1)·σ / (2√T)] + q·S·e^(-qT)·N(d1) - r·K·e^(-rT)·N(d2)
+      Put:  -[S·e^(-qT)·N'(d1)·σ / (2√T)] - q·S·e^(-qT)·N(-d1) + r·K·e^(-rT)·N(-d2)
+    """
     if T <= 0 or sigma <= 0:
         return 0.0
     d1 = bs_d1(S, K, T, r, q, sigma)
     d2 = d1 - sigma * np.sqrt(T)
-    term1 = -(S * np.exp(-q * T) * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
+    # Common term: -(S e^{-qT} N'(d1) σ) / (2√T)
+    shared = -(S * np.exp(-q * T) * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
     if cp == "call":
-        term2 = q * S * np.exp(-q * T) * norm.cdf(d1)
-        term3 = -r * K * np.exp(-r * T) * norm.cdf(d2)
-        return (term1 - term2 + term3) / 365.0  # per-day
+        theta_annual = shared + q * S * np.exp(-q * T) * norm.cdf(d1) - r * K * np.exp(-r * T) * norm.cdf(d2)
     else:
-        term2 = -q * S * np.exp(-q * T) * norm.cdf(-d1)
-        term3 = r * K * np.exp(-r * T) * norm.cdf(-d2)
-        return (term1 + term2 - term3) / 365.0
+        theta_annual = shared - q * S * np.exp(-q * T) * norm.cdf(-d1) + r * K * np.exp(-r * T) * norm.cdf(-d2)
+    return theta_annual / 365.0  # per calendar day
 
 
 def bs_vega(S, K, T, r, q, sigma):
@@ -132,10 +135,41 @@ def implied_volatility(
 #  REALIZED VOLATILITY
 # ═══════════════════════════════════════════════
 
-def compute_realized_vol(candles: List[Candle], window: int) -> Optional[float]:
+# Annualization factors: number of periods in a trading year.
+# US equities: 252 days × 6.5 hours = 1638 trading hours.
+ANNUALIZATION_MAP: Dict[str, float] = {
+    "1min":  252 * 6.5 * 60,   # ~98_280 one-minute bars per year
+    "5min":  252 * 6.5 * 12,   # ~19_656
+    "15min": 252 * 6.5 * 4,    # ~6_552
+    "30min": 252 * 6.5 * 2,    # ~3_276
+    "1hour": 252 * 6.5,        # ~1_638
+    "4hour": 252 * 1.625,      # ~409.5
+    "1day":  252,
+    "1week": 52,
+}
+
+
+def _periods_per_year(timeframe: str) -> float:
+    """Return the correct annualization factor for a given timeframe."""
+    return ANNUALIZATION_MAP.get(timeframe, 252)
+
+
+def _candles_per_day(timeframe: str) -> float:
+    """How many candles make up one trading day for a given timeframe."""
+    cpd_map = {
+        "1min": 390, "5min": 78, "15min": 26, "30min": 13,
+        "1hour": 6.5, "4hour": 1.625, "1day": 1, "1week": 0.2,
+    }
+    return cpd_map.get(timeframe, 1)
+
+
+def compute_realized_vol(
+    candles: List[Candle], window: int, timeframe: str = "1day",
+) -> Optional[float]:
     """
     Close-to-close realized volatility (annualized).
-    Uses log returns over the given window.
+    `window` is in *candles* (not days). The annualization factor is
+    chosen based on the candle timeframe.
     """
     if len(candles) < window + 1:
         return None
@@ -147,12 +181,16 @@ def compute_realized_vol(candles: List[Candle], window: int) -> Optional[float]:
         return None
 
     recent = log_returns[-window:]
-    return float(np.std(recent, ddof=1) * np.sqrt(252))
+    ann = _periods_per_year(timeframe)
+    return float(np.std(recent, ddof=1) * np.sqrt(ann))
 
 
-def compute_parkinson_vol(candles: List[Candle], window: int) -> Optional[float]:
+def compute_parkinson_vol(
+    candles: List[Candle], window: int, timeframe: str = "1day",
+) -> Optional[float]:
     """
     Parkinson (high-low) volatility estimator — more efficient than close-to-close.
+    `window` is in *candles*. Annualization factor derived from `timeframe`.
     """
     if len(candles) < window:
         return None
@@ -163,14 +201,20 @@ def compute_parkinson_vol(candles: List[Candle], window: int) -> Optional[float]
     if len(hl_ratio) < 2:
         return None
 
+    ann = _periods_per_year(timeframe)
     variance = np.mean(hl_ratio**2) / (4 * np.log(2))
-    return float(np.sqrt(variance * 252))
+    return float(np.sqrt(variance * ann))
 
 
 def compute_gmm_weighted_vol(gmm: GMMResult) -> Tuple[float, float]:
     """
-    Compute mixture-weighted volatility and kurtosis from GMM components.
-    More accurate than simple std dev as it captures multi-modal structure.
+    Compute mixture-weighted standard deviation (price-space) and excess
+    kurtosis from GMM components.
+
+    NOTE: The returned "vol" is a price-space std dev, NOT an annualized
+    return volatility. It quantifies dispersion of the price distribution
+    and should be compared only to other price-space measures, not to IV
+    or close-to-close realized vol (which live in log-return space).
     """
     if not gmm or not gmm.components:
         return 0.0, 0.0
@@ -191,9 +235,9 @@ def compute_gmm_weighted_vol(gmm: GMMResult) -> Tuple[float, float]:
         total_fourth += comp_fourth
 
     kurt = (total_fourth / total_var**2) - 3.0 if total_var > 0 else 0.0
-    annualized_vol = np.sqrt(total_var) if total_var > 0 else 0.0
+    price_std_dev = np.sqrt(total_var) if total_var > 0 else 0.0
 
-    return float(annualized_vol), float(kurt)
+    return float(price_std_dev), float(kurt)
 
 
 # ═══════════════════════════════════════════════
@@ -396,8 +440,28 @@ def generate_signals(
 
             # Estimate P&L
             total_credit = sum(l.get("mid", 0) or 0 for l in legs) * 100
-            width = abs(legs[0]["strike"] - legs[1]["strike"]) * 100 if len(legs) == 2 else 0
-            max_loss = (width - total_credit) if width > 0 else total_credit * 3
+
+            # Correct max-loss semantics:
+            #   - Short Strangle (2 legs): theoretically unlimited (call side).
+            #     We flag this clearly; no fake number.
+            #   - Naked Short Call (1 leg): theoretically unlimited → None.
+            #   - Naked Short Put  (1 leg): max loss = (strike − premium) × 100.
+            max_loss_est: Optional[float] = None
+            strategy_label = "Short Strangle"
+            if len(legs) == 2:
+                # Strangle: unlimited on the upside.  Report None.
+                max_loss_est = None
+                strategy_label = "Short Strangle"
+            elif len(legs) == 1:
+                leg = legs[0]
+                if leg["type"] == "put":
+                    # Naked short put: max loss = strike × 100 − credit
+                    max_loss_est = leg["strike"] * 100 - total_credit
+                    strategy_label = "Naked Short Put"
+                else:
+                    # Naked short call: theoretically unlimited
+                    max_loss_est = None
+                    strategy_label = "Naked Short Call"
 
             prob = 1.0 - (vol_analysis.realized_vol_20d or 0.20) / (vol_analysis.atm_iv_near or 0.25) if vol_analysis.atm_iv_near else None
 
@@ -405,14 +469,14 @@ def generate_signals(
                 signal_type="vol_crush",
                 direction="sell_premium",
                 conviction=conviction,
-                strategy="Short Strangle" if len(legs) == 2 else "Naked Option",
-                description=f"VRP is {vrp:.1%} — IV ({vol_analysis.atm_iv_near:.1%}) significantly exceeds realized vol ({vol_analysis.realized_vol_20d:.1%}). Sell premium to capture the spread.",
+                strategy=strategy_label,
+                description=f"VRP is {vrp:.1%} — IV ({vol_analysis.atm_iv_near:.1%}) significantly exceeds 20d realized vol ({vol_analysis.realized_vol_20d:.1%}, Parkinson/close-to-close best estimate). Sell premium to capture the spread.",
                 rationale=f"20-day realized vol is {vol_analysis.realized_vol_20d:.1%} while near-term ATM IV is {vol_analysis.atm_iv_near:.1%}. The market is pricing in {vrp:.1%} more volatility than has been realized. Statistically, selling premium here has a positive expected value.",
                 legs=legs,
                 max_profit=round(total_credit, 2) if total_credit else None,
-                max_loss=round(-max_loss, 2) if max_loss else None,
+                max_loss=round(-max_loss_est, 2) if max_loss_est and max_loss_est > 0 else None,
                 probability_of_profit=round(prob, 4) if prob and 0 < prob < 1 else None,
-                risk_reward_ratio=round(total_credit / max_loss, 4) if max_loss > 0 and total_credit > 0 else None,
+                risk_reward_ratio=round(total_credit / max_loss_est, 4) if max_loss_est and max_loss_est > 0 and total_credit > 0 else None,
                 net_delta=round(sum(l.get("delta", 0) or 0 for l in legs), 4),
                 net_theta=None,
                 net_vega=None,

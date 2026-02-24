@@ -201,6 +201,9 @@ class VolatilityResponse(BaseModel):
     volatility_analysis: VolatilityAnalysis
     trade_signals: List[TradeSignal]
     summary_text: str
+    # Cached raw data — returned so the frontend can reprocess without re-fetching
+    cached_contracts: List[OptionContract] = []
+    cached_bars: Dict[str, Any] = {}      # option_ticker -> {close, volume, ...}
 
 
 class VolatilityRequest(BaseModel):
@@ -208,6 +211,7 @@ class VolatilityRequest(BaseModel):
     ticker: str
     candles: List[Candle]              # underlying candles already fetched
     spot_price: float
+    timeframe: str = "1day"            # e.g. "1min","5min","1hour","1day","1week"
     gmm_d2: Optional[GMMResult] = None  # pass GMM results for enhanced analysis
     risk_free_rate: float = 0.05
     dividend_yield: float = 0.0
@@ -216,3 +220,23 @@ class VolatilityRequest(BaseModel):
     far_expiry_min_days: int = 46
     far_expiry_max_days: int = 180
     strike_range_pct: float = 0.15     # +/- 15% from spot
+
+
+class ReprocessRequest(BaseModel):
+    """Re-run greeks/IV/signals using cached data — no Polygon API calls."""
+    ticker: str
+    candles: List[Candle]
+    spot_price: float
+    timeframe: str = "1day"
+    gmm_d2: Optional[GMMResult] = None
+    risk_free_rate: float = 0.05
+    dividend_yield: float = 0.0
+    near_expiry_min_days: int = 7
+    near_expiry_max_days: int = 45
+    far_expiry_min_days: int = 46
+    far_expiry_max_days: int = 180
+    strike_range_pct: float = 0.15
+    # Cached data from a previous /volatility call
+    cached_contracts: List[OptionContract]
+    cached_bars: Dict[str, Any]        # option_ticker -> {close, volume, ...}
+

@@ -1,10 +1,10 @@
 import { useState } from 'react'
 
-const TIMEFRAMES = ['1min','5min','15min','30min','1hour','4hour','1day','1week']
-const ASSET_CLASSES = ['auto','stocks','crypto','forex']
-const HINTS = { auto:'AAPL, X:BTCUSD, C:EURUSD', stocks:'AAPL, SPY, TSLA', crypto:'BTCUSD, X:ETHUSD', forex:'EURUSD, C:GBPJPY' }
+const TIMEFRAMES = ['1min', '5min', '15min', '30min', '1hour', '4hour', '1day', '1week']
+const ASSET_CLASSES = ['auto', 'stocks', 'crypto', 'forex']
+const HINTS = { auto: 'AAPL, X:BTCUSD, C:EURUSD', stocks: 'AAPL, SPY, TSLA', crypto: 'BTCUSD, X:ETHUSD', forex: 'EURUSD, C:GBPJPY' }
 
-export default function Controls({ onFetchAndAnalyze, onRunVolatility, loading, status }) {
+export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReprocess, hasVolCache, loading, status }) {
   const [apiKey, setApiKey] = useState(() => sessionStorage.getItem('polygon_api_key') || '')
   const [ticker, setTicker] = useState('SPY')
   const [assetClass, setAssetClass] = useState('auto')
@@ -148,6 +148,19 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, loading, 
             style={{ ...S.btn, ...S.btnVol, ...(loading ? S.btnDisabled : {}), marginTop: 6 }}>
             {loading ? '⏳ Processing…' : '◈ Run Vol Analysis'}
           </button>
+          {hasVolCache && (
+            <button
+              onClick={() => onReprocess({
+                risk_free_rate: riskFreeRate,
+                dividend_yield: divYield,
+                strike_range_pct: strikeRange / 100,
+              })}
+              disabled={loading}
+              style={{ ...S.btn, ...S.btnReprocess, ...(loading ? S.btnDisabled : {}), marginTop: 6 }}
+            >
+              {loading ? '⏳ Processing…' : '⟳ Reprocess (cached)'}
+            </button>
+          )}
         </div>
 
         {status && (
@@ -241,6 +254,10 @@ const S = {
   },
   btnPrimary: { background: '#1d4ed8', color: '#fff' },
   btnVol: { background: 'linear-gradient(135deg, #7c3aed 0%, #3b82f6 100%)', color: '#fff' },
+  btnReprocess: {
+    background: 'linear-gradient(135deg, #059669 0%, #10b981 100%)', color: '#fff',
+    border: '1px solid #34d399',
+  },
   btnDisabled: { opacity: 0.4, cursor: 'not-allowed' },
   statusBox: {
     marginTop: 10, padding: '8px 10px', background: '#111318',

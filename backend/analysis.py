@@ -13,7 +13,7 @@ from models import Candle, DistributionData, GMMResult, GMMComponent
 def build_distributions(
     candles: List[Candle],
     num_bins: int = 200,
-) -> Tuple[DistributionData, DistributionData, np.ndarray, np.ndarray]:
+) -> Tuple[DistributionData, DistributionData, np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Returns D1 (time-at-price) and D2 (volume-weighted time-at-price) distributions.
     Also returns the raw bin arrays for GMM fitting.
@@ -136,9 +136,10 @@ def fit_gmm(
         comp_y = weight * stats.norm.pdf(x_eval, loc=mean, scale=std_dev)
         fitted_total += comp_y
 
-        comp_samples = np.random.normal(mean, std_dev, size=2000)
-        skewness = float(stats.skew(comp_samples))
-        kurtosis = float(stats.kurtosis(comp_samples, fisher=True))
+        # Individual Gaussian components have skewness=0 and excess kurtosis=0
+        # by definition; no need to estimate via random sampling.
+        skewness = 0.0
+        kurtosis = 0.0
 
         if weight > 0.20:
             label = "HVN"
