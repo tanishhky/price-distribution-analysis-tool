@@ -42,20 +42,22 @@ price-distribution-tool/
 ### Bug Fixes & Correctness Improvements
 
 - **Black-Scholes theta** — Fixed sign errors in both call and put theta for dividend-paying stocks
-- **Timeframe-aware annualization** — Realized vol now uses correct `sqrt(N)` factor for any timeframe (1min through 1week), not just daily
+- **Multi-asset annualization** — Realized vol uses correct factors per asset class: Stocks (252d × 6.5h), Crypto (365d × 24h), Forex (252d × 24h)
 - **Window lookback** — "RV 10d" now correctly converts day-based windows to candle counts (e.g. 10 days × 6.5 = 65 hourly candles)
 - **Weekend/holiday crash** — Option bar lookup now walks backwards to find last trading day instead of hardcoding "yesterday"
 - **Options chain completeness** — Raised contract fetch limit from 250 to 1000 to capture the full chain for liquid assets like SPY
 - **Naked option max-loss** — Corrected from arbitrary `3× credit` to proper theoretical values (unlimited for calls, `strike × 100 − credit` for puts)
 - **Pagination fix** — Polygon pagination no longer sends duplicate `apiKey` query params
 - **GMM component stats** — Skewness/kurtosis now use theoretical Gaussian values (0.0) instead of noisy random sampling
-- **GMM vol labeling** — Clearly documented as price-space std dev (not comparable to IV/RV)
+- **GMM vol display** — Summary now shows price-space dispersion as `$5.63` instead of incorrectly formatting as `563.00%`
+- **IV Surface chart** — Switched from Plotly `surface` (requires perfect 2D grid) to `mesh3d` (Delaunay triangulation handles sparse option data)
 - **Return type hint** — `build_distributions` type hint corrected to match 6-item return
 
 ### Data Caching & Reprocessing
 
 - **Instant parameter tweaking** — After running vol analysis, change risk-free rate or dividend yield and click **⟳ Reprocess (cached)** to recompute greeks, IV, and signals without re-fetching from Polygon
 - **New `/volatility/reprocess` endpoint** — Accepts cached contracts + bars, skips all API calls
+- **Save / Load cache** — **↓ Save** exports all session data (candles, analysis, contracts, bars, vol results) as a JSON file. **↑ Load** restores it instantly — all tabs (DATA, VOL, SIGNALS, CHARTS) repopulate without any API calls
 - **Frontend caching** — Raw option data stored in React state for instant reuse
 
 ## Features
@@ -123,7 +125,8 @@ npm run dev
 4. Click **▶ Fetch & Analyze** — runs GMM distribution analysis
 5. Click **◈ Run Vol Analysis** — fetches options chain, computes IV surface, generates signals
 6. Tweak risk-free rate or dividend yield → click **⟳ Reprocess (cached)** for instant results
-7. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA
+7. Click **↓ Save** to export session cache as JSON — reload later with **↑ Load** (zero API calls)
+8. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA
 
 ## API Endpoints
 

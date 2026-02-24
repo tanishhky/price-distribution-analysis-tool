@@ -79,7 +79,7 @@ function IVSmileChart({ surface, spot, height }) {
     byExpiry[key].push(p)
   }
 
-  const colors = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#a78bfa','#ec4899','#14b8a6','#f97316']
+  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a78bfa', '#ec4899', '#14b8a6', '#f97316']
   const traces = Object.entries(byExpiry).map(([key, pts], i) => {
     pts.sort((a, b) => a.strike - b.strike)
     return {
@@ -107,8 +107,8 @@ function IVSmileChart({ surface, spot, height }) {
 function VolCompareChart({ va, height }) {
   const labels = ['RV 10d', 'RV 20d', 'RV 30d', 'RV 60d', 'GMM Vol', 'ATM IV Near', 'ATM IV Far']
   const vals = [va.realized_vol_10d, va.realized_vol_20d, va.realized_vol_30d, va.realized_vol_60d,
-    va.gmm_weighted_vol, va.atm_iv_near, va.atm_iv_far]
-  const colors = ['#22c55e','#22c55e','#22c55e','#22c55e','#a78bfa','#f59e0b','#f59e0b']
+  va.gmm_weighted_vol, va.atm_iv_near, va.atm_iv_far]
+  const colors = ['#22c55e', '#22c55e', '#22c55e', '#22c55e', '#a78bfa', '#f59e0b', '#f59e0b']
 
   const filteredLabels = [], filteredVals = [], filteredColors = []
   for (let i = 0; i < vals.length; i++) {
@@ -136,25 +136,25 @@ function VolCompareChart({ va, height }) {
 }
 
 function IVSurface3D({ surface, height }) {
-  // Build grid data
-  const strikes = [...new Set(surface.map(p => p.moneyness))].sort((a, b) => a - b)
-  const expiries = [...new Set(surface.map(p => p.expiry_days))].sort((a, b) => a - b)
-
-  const zData = expiries.map(exp =>
-    strikes.map(strike => {
-      const pt = surface.find(p => p.moneyness === strike && p.expiry_days === exp)
-      return pt ? pt.iv * 100 : null
-    })
-  )
+  // Use flat arrays for mesh3d instead of building a sparse 2D grid
+  const xData = surface.map(p => p.moneyness)
+  const yData = surface.map(p => p.expiry_days)
+  const zData = surface.map(p => p.iv * 100)
 
   return (
     <Plot data={[{
-      type: 'surface',
-      x: strikes, y: expiries, z: zData,
+      type: 'mesh3d', // Changed from 'surface'
+      x: xData,
+      y: yData,
+      z: zData,
+      intensity: zData, // Determines the color mapping
       colorscale: [[0, '#0a0b0d'], [0.25, '#1e3a5f'], [0.5, '#3b82f6'], [0.75, '#f59e0b'], [1, '#ef4444']],
-      showscale: true, colorbar: { title: { text: 'IV %', font: { color: '#9ca3af', size: 10, family: MONO } }, tickfont: { color: '#6b7280', size: 9 } },
+      showscale: true,
+      colorbar: {
+        title: { text: 'IV %', font: { color: '#9ca3af', size: 10, family: MONO } },
+        tickfont: { color: '#6b7280', size: 9 }
+      },
       hovertemplate: 'Moneyness: %{x:.3f}<br>DTE: %{y}d<br>IV: %{z:.1f}%<extra></extra>',
-      contours: { z: { show: true, usecolormap: true, project: { z: false } } },
     }]} layout={{
       ...darkLayout('Implied Volatility Surface'),
       scene: {

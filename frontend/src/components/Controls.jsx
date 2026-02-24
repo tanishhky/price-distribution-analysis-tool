@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 
 const TIMEFRAMES = ['1min', '5min', '15min', '30min', '1hour', '4hour', '1day', '1week']
 const ASSET_CLASSES = ['auto', 'stocks', 'crypto', 'forex']
 const HINTS = { auto: 'AAPL, X:BTCUSD, C:EURUSD', stocks: 'AAPL, SPY, TSLA', crypto: 'BTCUSD, X:ETHUSD', forex: 'EURUSD, C:GBPJPY' }
 
-export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReprocess, hasVolCache, loading, status }) {
+export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReprocess, onDownloadCache, onUploadCache, hasVolCache, loading, status }) {
+  const fileInputRef = useRef(null)
   const [apiKey, setApiKey] = useState(() => sessionStorage.getItem('polygon_api_key') || '')
   const [ticker, setTicker] = useState('SPY')
   const [assetClass, setAssetClass] = useState('auto')
@@ -161,6 +162,28 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
               {loading ? '⏳ Processing…' : '⟳ Reprocess (cached)'}
             </button>
           )}
+
+          {/* Cache IO — compact row */}
+          <div style={S.cacheRow}>
+            <button
+              onClick={onDownloadCache}
+              disabled={!hasVolCache}
+              style={{ ...S.cacheBtn, ...(hasVolCache ? {} : S.cacheBtnDisabled) }}
+              title="Download cached data as JSON"
+            >↓ Save</button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              style={S.cacheBtn}
+              title="Load cached data from JSON file"
+            >↑ Load</button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              style={{ display: 'none' }}
+              onChange={e => { onUploadCache(e.target.files[0]); e.target.value = '' }}
+            />
+          </div>
         </div>
 
         {status && (
@@ -258,6 +281,17 @@ const S = {
     background: 'linear-gradient(135deg, #059669 0%, #10b981 100%)', color: '#fff',
     border: '1px solid #34d399',
   },
+  cacheRow: {
+    display: 'flex', gap: 4, marginTop: 8, paddingTop: 8,
+    borderTop: '1px solid #1a1d25',
+  },
+  cacheBtn: {
+    flex: 1, background: '#151820', border: '1px solid #1e2230',
+    borderRadius: 3, color: '#9ca3af', padding: '4px 0', fontSize: 10,
+    cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace",
+    textAlign: 'center', transition: 'all 0.12s',
+  },
+  cacheBtnDisabled: { opacity: 0.3, cursor: 'not-allowed' },
   btnDisabled: { opacity: 0.4, cursor: 'not-allowed' },
   statusBox: {
     marginTop: 10, padding: '8px 10px', background: '#111318',

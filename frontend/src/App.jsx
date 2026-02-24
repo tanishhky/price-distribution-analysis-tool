@@ -119,6 +119,69 @@ export default function App() {
     finally { setLoading(false) }
   }
 
+  const handleDownloadCache = () => {
+    if (!cachedContracts || !cachedBars || !candles) {
+      return setErr('No cached data to download. Run Vol Analysis first.')
+    }
+    const payload = {
+      _version: 2,
+      ticker: analysis?.ticker || 'UNKNOWN',
+      timeframe: lastParams?.fetchResult?.timeframe || '1day',
+      asset_class: lastParams?.fetchResult?.asset_class || 'stocks',
+      spot_price: candles[candles.length - 1].close,
+      candles,
+      analysis,          // full GMM analysis (results_text, gmm_d1, gmm_d2, etc.)
+      vol_data: volData,  // full vol response (volatility_analysis, trade_signals, summary)
+      cached_contracts: cachedContracts,
+      cached_bars: cachedBars,
+      saved_at: new Date().toISOString(),
+    }
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `voledge_${payload.ticker}_${payload.saved_at.slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    setOk(`Cache exported (${(blob.size / 1024).toFixed(0)} KB)`)
+  }
+
+  const handleUploadCache = (file) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result)
+        if (!data.cached_contracts || !data.cached_bars || !data.candles) {
+          return setErr('Invalid cache file — missing required fields.')
+        }
+        setCandles(data.candles)
+        setCachedContracts(data.cached_contracts)
+        setCachedBars(data.cached_bars)
+        // Restore full analysis if present (v2+), otherwise build minimal
+        if (data.analysis) {
+          setAnalysis(data.analysis)
+        } else {
+          setAnalysis({ ticker: data.ticker, gmm_d2: data.gmm_d2 || null })
+        }
+        // Restore full vol data if present (v2+)
+        if (data.vol_data) {
+          setVolData(data.vol_data)
+        }
+        setLastParams(prev => ({
+          ...prev,
+          fetchResult: {
+            ...prev?.fetchResult,
+            timeframe: data.timeframe || '1day',
+            asset_class: data.asset_class || 'stocks',
+          },
+        }))
+        setOk(`Cache loaded: ${data.ticker} (${data.cached_contracts.length} contracts, saved ${data.saved_at?.slice(0, 10) || 'unknown'})`)
+      } catch { setErr('Failed to parse cache file.') }
+    }
+    reader.readAsText(file)
+  }
+
   const TABS = [
     { id: 'charts', label: 'CHARTS', icon: '▤' },
     { id: 'profile', label: 'PROFILE', icon: '▥' },
@@ -133,6 +196,8 @@ export default function App() {
         onFetchAndAnalyze={handleFetchAndAnalyze}
         onRunVolatility={handleRunVolatility}
         onReprocess={handleReprocess}
+        onDownloadCache={handleDownloadCache}
+        onUploadCache={handleUploadCache}
         hasVolCache={!!(cachedContracts && cachedBars)}
         loading={loading}
         status={status}
