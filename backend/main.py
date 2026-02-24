@@ -130,17 +130,17 @@ async def volatility_analysis(req: VolatilityRequest):
 
         # ── Step 1: Compute realized volatility from candles ──
         # Convert day-based windows to candle counts based on timeframe
-        cpd = _candles_per_day(req.timeframe)
+        cpd = _candles_per_day(req.timeframe, req.asset_class)
         w10 = max(2, int(10 * cpd))
         w20 = max(2, int(20 * cpd))
         w30 = max(2, int(30 * cpd))
         w60 = max(2, int(60 * cpd))
 
-        rv_10 = compute_realized_vol(req.candles, w10, req.timeframe)
-        rv_20 = compute_realized_vol(req.candles, w20, req.timeframe)
-        rv_30 = compute_realized_vol(req.candles, w30, req.timeframe)
-        rv_60 = compute_realized_vol(req.candles, w60, req.timeframe)
-        park_20 = compute_parkinson_vol(req.candles, w20, req.timeframe)
+        rv_10 = compute_realized_vol(req.candles, w10, req.timeframe, req.asset_class)
+        rv_20 = compute_realized_vol(req.candles, w20, req.timeframe, req.asset_class)
+        rv_30 = compute_realized_vol(req.candles, w30, req.timeframe, req.asset_class)
+        rv_60 = compute_realized_vol(req.candles, w60, req.timeframe, req.asset_class)
+        park_20 = compute_parkinson_vol(req.candles, w20, req.timeframe, req.asset_class)
 
         # Use Parkinson as primary if available (more efficient estimator)
         rv_best_20 = park_20 if park_20 else rv_20
@@ -299,17 +299,17 @@ async def volatility_reprocess(req: ReprocessRequest):
             raise HTTPException(status_code=400, detail="Invalid spot price")
 
         # ── Step 1: Compute realized volatility from candles ──
-        cpd = _candles_per_day(req.timeframe)
+        cpd = _candles_per_day(req.timeframe, req.asset_class)
         w10 = max(2, int(10 * cpd))
         w20 = max(2, int(20 * cpd))
         w30 = max(2, int(30 * cpd))
         w60 = max(2, int(60 * cpd))
 
-        rv_10 = compute_realized_vol(req.candles, w10, req.timeframe)
-        rv_20 = compute_realized_vol(req.candles, w20, req.timeframe)
-        rv_30 = compute_realized_vol(req.candles, w30, req.timeframe)
-        rv_60 = compute_realized_vol(req.candles, w60, req.timeframe)
-        park_20 = compute_parkinson_vol(req.candles, w20, req.timeframe)
+        rv_10 = compute_realized_vol(req.candles, w10, req.timeframe, req.asset_class)
+        rv_20 = compute_realized_vol(req.candles, w20, req.timeframe, req.asset_class)
+        rv_30 = compute_realized_vol(req.candles, w30, req.timeframe, req.asset_class)
+        rv_60 = compute_realized_vol(req.candles, w60, req.timeframe, req.asset_class)
+        park_20 = compute_parkinson_vol(req.candles, w20, req.timeframe, req.asset_class)
         rv_best_20 = park_20 if park_20 else rv_20
 
         gmm_vol, gmm_kurt = 0.0, 0.0

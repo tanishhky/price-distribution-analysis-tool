@@ -212,6 +212,7 @@ class VolatilityRequest(BaseModel):
     candles: List[Candle]              # underlying candles already fetched
     spot_price: float
     timeframe: str = "1day"            # e.g. "1min","5min","1hour","1day","1week"
+    asset_class: str = "stocks"        # "stocks", "crypto", or "forex"
     gmm_d2: Optional[GMMResult] = None  # pass GMM results for enhanced analysis
     risk_free_rate: float = 0.05
     dividend_yield: float = 0.0
@@ -228,6 +229,7 @@ class ReprocessRequest(BaseModel):
     candles: List[Candle]
     spot_price: float
     timeframe: str = "1day"
+    asset_class: str = "stocks"
     gmm_d2: Optional[GMMResult] = None
     risk_free_rate: float = 0.05
     dividend_yield: float = 0.0

@@ -136,40 +136,74 @@ def implied_volatility(
 # ═══════════════════════════════════════════════
 
 # Annualization factors: number of periods in a trading year.
-# US equities: 252 days × 6.5 hours = 1638 trading hours.
-ANNUALIZATION_MAP: Dict[str, float] = {
-    "1min":  252 * 6.5 * 60,   # ~98_280 one-minute bars per year
-    "5min":  252 * 6.5 * 12,   # ~19_656
-    "15min": 252 * 6.5 * 4,    # ~6_552
-    "30min": 252 * 6.5 * 2,    # ~3_276
-    "1hour": 252 * 6.5,        # ~1_638
-    "4hour": 252 * 1.625,      # ~409.5
-    "1day":  252,
-    "1week": 52,
+# Varies by asset class:
+#   Stocks: 252 trading days, 6.5 hours/day
+#   Crypto: 365 days, 24 hours/day (trades continuously)
+#   Forex:  252 trading days, 24 hours/day
+ANNUALIZATION_MAPS: Dict[str, Dict[str, float]] = {
+    "stocks": {
+        "1min":  252 * 6.5 * 60,   # ~98_280
+        "5min":  252 * 6.5 * 12,   # ~19_656
+        "15min": 252 * 6.5 * 4,    # ~6_552
+        "30min": 252 * 6.5 * 2,    # ~3_276
+        "1hour": 252 * 6.5,        # ~1_638
+        "4hour": 252 * 1.625,      # ~409.5
+        "1day":  252,
+        "1week": 52,
+    },
+    "crypto": {
+        "1min":  365 * 24 * 60,    # ~525_600
+        "5min":  365 * 24 * 12,    # ~105_120
+        "15min": 365 * 24 * 4,     # ~35_040
+        "30min": 365 * 24 * 2,     # ~17_520
+        "1hour": 365 * 24,         # ~8_760
+        "4hour": 365 * 6,          # ~2_190
+        "1day":  365,
+        "1week": 52,
+    },
+    "forex": {
+        "1min":  252 * 24 * 60,    # ~362_880
+        "5min":  252 * 24 * 12,    # ~72_576
+        "15min": 252 * 24 * 4,     # ~24_192
+        "30min": 252 * 24 * 2,     # ~12_096
+        "1hour": 252 * 24,         # ~6_048
+        "4hour": 252 * 6,          # ~1_512
+        "1day":  252,
+        "1week": 52,
+    },
 }
 
 
-def _periods_per_year(timeframe: str) -> float:
-    """Return the correct annualization factor for a given timeframe."""
-    return ANNUALIZATION_MAP.get(timeframe, 252)
+def _periods_per_year(timeframe: str, asset_class: str = "stocks") -> float:
+    """Return the correct annualization factor for a given timeframe and asset class."""
+    ac = asset_class if asset_class in ANNUALIZATION_MAPS else "stocks"
+    return ANNUALIZATION_MAPS[ac].get(timeframe, ANNUALIZATION_MAPS[ac].get("1day", 252))
 
 
-def _candles_per_day(timeframe: str) -> float:
-    """How many candles make up one trading day for a given timeframe."""
+def _candles_per_day(timeframe: str, asset_class: str = "stocks") -> float:
+    """How many candles make up one trading day for a given timeframe and asset class."""
+    hours_per_day = {"stocks": 6.5, "crypto": 24, "forex": 24}.get(asset_class, 6.5)
     cpd_map = {
-        "1min": 390, "5min": 78, "15min": 26, "30min": 13,
-        "1hour": 6.5, "4hour": 1.625, "1day": 1, "1week": 0.2,
+        "1min": hours_per_day * 60,
+        "5min": hours_per_day * 12,
+        "15min": hours_per_day * 4,
+        "30min": hours_per_day * 2,
+        "1hour": hours_per_day,
+        "4hour": hours_per_day / 4,
+        "1day": 1,
+        "1week": 0.2,
     }
     return cpd_map.get(timeframe, 1)
 
 
 def compute_realized_vol(
-    candles: List[Candle], window: int, timeframe: str = "1day",
+    candles: List[Candle], window: int,
+    timeframe: str = "1day", asset_class: str = "stocks",
 ) -> Optional[float]:
     """
     Close-to-close realized volatility (annualized).
     `window` is in *candles* (not days). The annualization factor is
-    chosen based on the candle timeframe.
+    chosen based on the candle timeframe and asset class.
     """
     if len(candles) < window + 1:
         return None
@@ -181,16 +215,17 @@ def compute_realized_vol(
         return None
 
     recent = log_returns[-window:]
-    ann = _periods_per_year(timeframe)
+    ann = _periods_per_year(timeframe, asset_class)
     return float(np.std(recent, ddof=1) * np.sqrt(ann))
 
 
 def compute_parkinson_vol(
-    candles: List[Candle], window: int, timeframe: str = "1day",
+    candles: List[Candle], window: int,
+    timeframe: str = "1day", asset_class: str = "stocks",
 ) -> Optional[float]:
     """
     Parkinson (high-low) volatility estimator — more efficient than close-to-close.
-    `window` is in *candles*. Annualization factor derived from `timeframe`.
+    `window` is in *candles*. Annualization factor derived from `timeframe` and `asset_class`.
     """
     if len(candles) < window:
         return None
@@ -201,7 +236,7 @@ def compute_parkinson_vol(
     if len(hl_ratio) < 2:
         return None
 
-    ann = _periods_per_year(timeframe)
+    ann = _periods_per_year(timeframe, asset_class)
     variance = np.mean(hl_ratio**2) / (4 * np.log(2))
     return float(np.sqrt(variance * ann))
 
@@ -736,7 +771,7 @@ def generate_vol_summary(vol: VolatilityAnalysis, signals: List[TradeSignal]) ->
         lines.append(f"  RV {label}: {val:.2%}" if val else f"  RV {label}: N/A")
 
     if vol.gmm_weighted_vol:
-        lines.append(f"  GMM-Weighted Vol: {vol.gmm_weighted_vol:.2%}")
+        lines.append(f"  GMM-Weighted Vol (Price Dispersion): ${vol.gmm_weighted_vol:.2f}")
     if vol.gmm_weighted_kurtosis is not None:
         lines.append(f"  GMM-Weighted Kurtosis: {vol.gmm_weighted_kurtosis:.4f}")
 
