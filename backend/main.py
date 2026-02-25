@@ -152,8 +152,8 @@ async def analyze(req: AnalyzeRequest):
         # Compute moment evolution (sliding window) with the SAME N
         moment_evo = compute_moment_evolution(
             candles=req.candles,
-            window_size=max(30, len(req.candles) // 5),
-            step_size=max(5, len(req.candles) // 30),
+            window_size=max(30, len(req.candles) // req.moment_window_ratio),
+            step_size=max(5, len(req.candles) // req.moment_step_ratio),
             num_bins=req.num_bins,
             n_components=effective_n_for_moments,
             sync_gmm=req.sync_gmm,
@@ -247,11 +247,9 @@ async def volatility_analysis(req: VolatilityRequest):
             bar_date -= timedelta(days=1)
         bar_date_str = bar_date.strftime("%Y-%m-%d")
 
-        # Multi-key round-robin for option bar fetching
-        # Polygon free tier: 5 req/min/key. Each key gets exactly 5 requests per batch.
-        # With N keys: 5N contracts per batch, 61s delay = 5N contracts/min (at limit).
+        # Polygon free tier: 5 req/min/key. Configurable via settings.
         n_keys = len(req.api_keys)
-        batch_size = 5  # requests per key per batch (= Polygon free tier limit)
+        batch_size = req.batch_size  # requests per key per batch
         total_rate = batch_size * n_keys
 
         enriched_chain: list[OptionContractWithGreeks] = []
@@ -261,8 +259,8 @@ async def volatility_analysis(req: VolatilityRequest):
             batch = contracts[batch_start:batch_start + total_rate]
 
             if batch_start > 0:
-                print(f"  [Vol] Rate limit pause (61s) before batch {batch_start}–{batch_start+len(batch)} ({len(contracts)} total)...")
-                await asyncio.sleep(61)  # 60s + 1s buffer to respect 5 req/min/key
+                print(f"  [Vol] Rate limit pause ({req.batch_delay}s) before batch {batch_start}–{batch_start+len(batch)} ({len(contracts)} total)...")
+                await asyncio.sleep(req.batch_delay)
 
             # Assign contracts to keys round-robin
             key_batches: dict = {i: [] for i in range(n_keys)}

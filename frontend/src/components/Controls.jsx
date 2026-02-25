@@ -9,6 +9,8 @@ export default function Controls({
   onFetchAndAnalyze, onReAnalyze, onRunVolatility, onReprocess,
   onDownloadCache, onUploadCache, onGmmParamsChange,
   hasCandles, hasVolCache, loading, status,
+  sidebarWidth = 260, sidebarCollapsed = false, onToggleCollapse,
+  maxGmmComponents = 10,
 }) {
   const fileInputRef = useRef(null)
   const [apiKeyInput, setApiKeyInput] = useState(() => sessionStorage.getItem('polygon_api_keys') || '')
@@ -73,13 +75,44 @@ export default function Controls({
     })
   }
 
+  if (sidebarCollapsed) {
+    return (
+      <aside style={{ ...S.sidebar, width: 42, minWidth: 42, alignItems: 'center', padding: 0 }}>
+        <div style={{ padding: '14px 0 10px', borderBottom: '1px solid #1a1d25', width: '100%', textAlign: 'center' }}>
+          <span style={S.brandIcon}>◈</span>
+        </div>
+        <button onClick={onToggleCollapse}
+          style={{
+            background: 'none', border: 'none', color: '#6b7280', fontSize: 14,
+            cursor: 'pointer', padding: '10px 0', width: '100%'
+          }}
+          title="Expand sidebar"
+        >▶</button>
+      </aside>
+    )
+  }
+
   return (
-    <aside style={S.sidebar}>
+    <aside style={{ ...S.sidebar, width: sidebarWidth, minWidth: sidebarWidth }}>
+      <style>{`
+        input[type=range].custom-slider { -webkit-appearance: none; width: 100%; background: transparent; }
+        input[type=range].custom-slider::-webkit-slider-thumb { -webkit-appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #3b82f6; cursor: pointer; margin-top: -4px; box-shadow: 0 0 0 2px #0f1014; transition: background 0.15s; }
+        input[type=range].custom-slider::-webkit-slider-thumb:hover { background: #60a5fa; }
+        input[type=range].custom-slider::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #1e2230; border-radius: 2px; }
+        input[type=range].custom-slider:focus { outline: none; }
+      `}</style>
       {/* Brand */}
       <div style={S.brand}>
         <span style={S.brandIcon}>◈</span>
         <span style={S.brandName}>VolEdge</span>
         <span style={S.version}>v3.1</span>
+        <button onClick={onToggleCollapse}
+          style={{
+            background: 'none', border: 'none', color: '#6b7280', fontSize: 11,
+            cursor: 'pointer', padding: '2px 4px', marginLeft: 4
+          }}
+          title="Collapse sidebar"
+        >◀</button>
       </div>
 
       <div style={S.scrollArea}>
@@ -147,12 +180,12 @@ export default function Controls({
             <div style={{ flex: 1 }}>
               <Lbl>Bins: {numBins}</Lbl>
               <input type="range" min={50} max={500} step={10} value={numBins}
-                onChange={e => setNumBins(Number(e.target.value))} style={S.slider} />
+                onChange={e => setNumBins(Number(e.target.value))} className="custom-slider" />
             </div>
             <div style={{ flex: 1 }}>
               <Lbl>GMM N: {nComponents === 0 ? 'Auto' : nComponents}</Lbl>
-              <input type="range" min={0} max={10} value={nComponents}
-                onChange={e => setNComponents(Number(e.target.value))} style={S.slider} />
+              <input type="range" min={0} max={maxGmmComponents} value={nComponents}
+                onChange={e => setNComponents(Number(e.target.value))} className="custom-slider" />
             </div>
           </Row>
           <div
@@ -182,7 +215,7 @@ export default function Controls({
           </Row>
           <Lbl>Strike range: ±{strikeRange}%</Lbl>
           <input type="range" min={5} max={30} value={strikeRange}
-            onChange={e => setStrikeRange(Number(e.target.value))} style={S.slider} />
+            onChange={e => setStrikeRange(Number(e.target.value))} className="custom-slider" />
         </Section>
 
         {/* Actions */}
@@ -276,6 +309,7 @@ const S = {
     width: 260, minWidth: 260, background: '#0f1014',
     borderRight: '1px solid #1a1d25', display: 'flex',
     flexDirection: 'column', height: '100vh', overflow: 'hidden',
+    transition: 'width 0.15s ease, min-width 0.15s ease',
   },
   brand: {
     padding: '14px 16px 10px', display: 'flex', alignItems: 'center', gap: 8,

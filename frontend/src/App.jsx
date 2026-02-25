@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import Controls from './components/Controls'
 import CandlestickChart from './components/CandlestickChart'
 import DistributionChart from './components/DistributionChart'
@@ -9,6 +9,7 @@ import VolatilityPanel from './components/VolatilityPanel'
 import SignalsPanel from './components/SignalsPanel'
 import MergePanel from './components/MergePanel'
 import MomentsChart from './components/MomentsChart'
+import SettingsModal, { useSettings } from './components/SettingsModal'
 import { fetchCandles, analyzeData, runVolatilityAnalysis, reprocessVolatility } from './api'
 
 const H = 340
@@ -20,6 +21,12 @@ export default function App() {
   const [analysis, setAnalysis] = useState(null)
   const [volData, setVolData] = useState(null)
   const [activeTab, setActiveTab] = useState('charts')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settings, updateSettings, resetSettings] = useSettings()
+  // Sidebar state
+  const [sidebarWidth, setSidebarWidth] = useState(260)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const isDragging = useRef(false)
   // Store params for vol analysis
   const [lastParams, setLastParams] = useState(null)
   // Cached data for reprocessing
@@ -57,6 +64,8 @@ export default function App() {
         end_date: fetchResult.end_date, candles: fetchResult.candles,
         num_bins: params.num_bins, n_components_override: params.n_components_override,
         sync_gmm: params.sync_gmm || false,
+        moment_window_ratio: settings.moment_window_ratio,
+        moment_step_ratio: settings.moment_step_ratio,
       })
       setAnalysis(analysisResult)
       setOk(`GMM complete — D1: ${analysisResult.gmm_d1.n_components}, D2: ${analysisResult.gmm_d2.n_components} components`)
@@ -79,6 +88,8 @@ export default function App() {
         end_date: fr.end_date, candles: candles,
         num_bins: params.num_bins, n_components_override: params.n_components_override,
         sync_gmm: params.sync_gmm || false,
+        moment_window_ratio: settings.moment_window_ratio,
+        moment_step_ratio: settings.moment_step_ratio,
       })
       setAnalysis(analysisResult)
       setLastParams(prev => ({ ...prev, num_bins: params.num_bins, n_components_override: params.n_components_override }))
@@ -94,11 +105,14 @@ export default function App() {
     setLoading(true)
     setVolData(null)
     try {
-      setInfo('Fetching options chain & computing Black-Scholes greeks…')
+      // Use the ticker from the actual fetched data, not the Controls input
+      // (user may have changed the input after fetching)
+      const effectiveTicker = lastParams?.fetchResult?.ticker || volParams.ticker
+      setInfo(`Fetching options chain for ${effectiveTicker}…`)
       const spot = candles[candles.length - 1].close
       const result = await runVolatilityAnalysis({
         api_keys: volParams.api_keys,
-        ticker: volParams.ticker,
+        ticker: effectiveTicker,
         candles: candles,
         spot_price: spot,
         timeframe: lastParams?.fetchResult?.timeframe || '1day',
@@ -107,6 +121,12 @@ export default function App() {
         risk_free_rate: volParams.risk_free_rate,
         dividend_yield: volParams.dividend_yield,
         strike_range_pct: volParams.strike_range_pct,
+        near_expiry_min_days: settings.near_expiry_min_days,
+        near_expiry_max_days: settings.near_expiry_max_days,
+        far_expiry_min_days: settings.far_expiry_min_days,
+        far_expiry_max_days: settings.far_expiry_max_days,
+        batch_size: settings.batch_size,
+        batch_delay: settings.batch_delay,
       })
       setVolData(result)
       setCachedContracts(result.cached_contracts || null)
@@ -263,6 +283,27 @@ export default function App() {
     { id: 'merge', label: 'MERGE', icon: '⊕' },
   ]
 
+  const handleDragStart = useCallback((e) => {
+    e.preventDefault()
+    isDragging.current = true
+    const onMove = (ev) => {
+      if (!isDragging.current) return
+      const newW = Math.min(450, Math.max(200, ev.clientX))
+      setSidebarWidth(newW)
+    }
+    const onUp = () => {
+      isDragging.current = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [])
+
   return (
     <div style={S.root}>
       <Controls
@@ -277,7 +318,26 @@ export default function App() {
         hasVolCache={!!(cachedContracts && cachedBars)}
         loading={loading}
         status={status}
+        sidebarWidth={sidebarWidth}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(p => !p)}
+        maxGmmComponents={settings.max_gmm_components}
       />
+
+      {/* Drag handle for resize */}
+      {!sidebarCollapsed && (
+        <div onMouseDown={handleDragStart}
+          style={{
+            width: 4, cursor: 'col-resize', background: 'transparent',
+            flexShrink: 0, position: 'relative', zIndex: 10
+          }}>
+          <div style={{
+            position: 'absolute', top: 0, bottom: 0, left: 1, width: 2,
+            background: isDragging.current ? '#3b82f6' : '#1a1d25',
+            transition: 'background 0.15s'
+          }} />
+        </div>
+      )}
 
       <div style={S.main}>
         {/* Tab bar */}
@@ -290,10 +350,19 @@ export default function App() {
               </button>
             ))}
           </div>
-          <div style={S.statusIndicator}>
+          <div style={{ ...S.statusIndicator, position: 'relative' }}>
             {analysis && <span style={S.dot} title="GMM loaded" />}
             {volData && <span style={{ ...S.dot, background: '#a78bfa' }} title="Vol loaded" />}
             <span style={S.tickerBadge}>{analysis?.ticker || '—'}</span>
+            <button onClick={() => setSettingsOpen(p => !p)}
+              style={{
+                background: 'none', border: 'none', color: settingsOpen ? '#3b82f6' : '#6b7280',
+                fontSize: 14, cursor: 'pointer', padding: '2px 6px', marginLeft: 4
+              }}
+              title="Settings"
+            >⚙</button>
+            <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)}
+              settings={settings} onUpdate={updateSettings} onReset={resetSettings} />
           </div>
         </div>
 

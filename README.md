@@ -11,7 +11,7 @@ Built on Polygon.io (free tier compatible). All greeks and IV computed locally v
 price-distribution-tool/
 ├── backend/
 │   ├── main.py                 # FastAPI — all endpoints
-│   ├── polygon_client.py       # Polygon.io stock/crypto/forex OHLCV
+│   ├── polygon_client.py       # Polygon.io stock/crypto/forex OHLCV + parallel fetch
 │   ├── options_client.py       # Polygon.io options contracts + bars
 │   ├── analysis.py             # D1, D2 distributions + GMM + moment evolution
 │   ├── volatility_engine.py    # Black-Scholes, IV, VRP, signal generation
@@ -20,112 +20,60 @@ price-distribution-tool/
 ├── frontend/
 │   ├── src/
 │   │   ├── main.jsx
-│   │   ├── App.jsx
-│   │   ├── api.js
+│   │   ├── App.jsx               # Main layout, State, Routing
+│   │   ├── api.js                # API client with validation error unwrapping
 │   │   └── components/
-│   │       ├── Controls.jsx          # Sidebar: multi-key, GMM params, sync toggle
-│   │       ├── CandlestickChart.jsx  # OHLCV + volume
+│   │       ├── Controls.jsx          # Collapsible sidebar: multi-key input, core params
+│   │       ├── SettingsModal.jsx     # Header dropdown: batch sizes, expiry ranges, moment rules
+│   │       ├── CandlestickChart.jsx  # Plotly OHLCV + volume
 │   │       ├── DistributionChart.jsx # D1/D2 histogram + KDE
-│   │       ├── GMMChart.jsx          # GMM decomposition
+│   │       ├── GMMChart.jsx          # GMM decomposition breakdown
 │   │       ├── ComparisonChart.jsx   # D1 vs D2 overlay
-│   │       ├── VolatilityPanel.jsx   # IV surface, vol compare, chain table
-│   │       ├── SignalsPanel.jsx      # Trade signals with legs + greeks
-│   │       ├── ResultsPanel.jsx      # Textual output + tables
-│   │       ├── MomentsChart.jsx      # 2×2 moment evolution charts
-│   │       └── MergePanel.jsx        # Cache file merger with dedup
+│   │       ├── VolatilityPanel.jsx   # IV surface, term structure, skew, chain table
+│   │       ├── SignalsPanel.jsx      # Trade signals with legs, greeks, PnL
+│   │       ├── ResultsPanel.jsx      # Textual narrative output + tables
+│   │       ├── MomentsChart.jsx      # 2×2 moment evolution charts (Mean, σ, Weight, Kurtosis)
+│   │       └── MergePanel.jsx        # Cache file merger with dedup statistics
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
 └── README.md
 ```
 
-## What's New in v3.0
+## Core Workflows & Features
 
-### Consistency & Cache Overhaul
-- **Re-Analyze button** — Change GMM N or bins and click "⟳ Re-Analyze (GMM)" to refit without re-fetching candles from Polygon
-- **Raw-only caching** — Downloaded cache files (v3) contain only candles + contracts + bars — no computed analysis. Prevents stale/conflicting results when merging files
-- **Auto-recompute on upload** — Loading a cache file triggers fresh GMM analysis + vol reprocessing automatically
+### 1. Data Fetching & Parallel Processing
+- **Multi-API Key Support** — Paste multiple Polygon keys (one per line or comma-separated) to bypass free tier constraints.
+- **Parallel Chunking** — The backend automatically splits historical date ranges across all available keys for concurrent fetching.
+- **Batched Option Lookups** — Options bars are fetched via round-robin key assignment. Rate limits are exactly managed (batch sizes and delays are configurable in settings).
 
-### Multi-API Key Parallel Fetching
-- **Multiple API keys** — Paste multiple Polygon keys (one per line or comma-separated) in the CONNECTION section
-- **Round-robin batching** — Keys are distributed across option bar batches: N keys → N×5 req/min throughput
-- **Key counter** — UI shows how many keys detected and effective request rate
+### 2. Gaussian Mixture Model (GMM) Analysis
+- **Independent or Synced Fitting** — Fit N components independently to Time-at-Price (D1) and Volume-Weighted (D2) distributions, or use "Sync D1/D2" to find the universally best shared N minimizing combined BIC.
+- **Moment Evolution** — Track how each Gaussian component's Mean, Volatility (σ), and Probability Weight drift over time via a sliding window, alongside the full Mixture Kurtosis.
+- **Re-Analyze** — Change bins or the maximum/desired components via the themed sliders and instantly re-run the math without re-fetching underlying candles.
 
-### Cache File Merger
-- **MERGE tab** — Upload multiple cache files, auto-detect overlapping candles by timestamp
-- **Dedup stats** — Shows input vs merged counts for candles, contracts, bars
-- **Download merged** — Export combined file for upload into any VolEdge session
+### 3. Volatility Engine (Locally Computed)
+- **Black-Scholes Pricing** — Full implementation with continuous dividends handling call/put greeks analytically.
+- **Implied Volatility Tracking** — Brent root-finding for IV calculation mapped to a 3D Volatility Surface.
+- **Metrics Dashboard** — 25Δ Put-Call Skew (fear premium), Volatility Risk Premium (VRP: IV minus realized vol), Term Structure, and Parkinson high-low volatility estimators.
 
-### Synced GMMs
-- **Sync D1/D2 toggle** — Finds optimal N minimizing combined BIC across both distributions
-- **Shared N** — When enabled, D1 and D2 use the same number of Gaussian components
+### 4. Trade Signal Generation
+Evaluates real-time math thresholds against the enriched options chain to output actionable strategies:
+1. **Vol Crush** — When VRP > 5%, sell short strangles to capture premium.
+2. **Skew Trade** — When 25Δ Put Skew exceeds GMM tail risk, sell put credit spreads.
+3. **Calendar Spread** — When term structure inverts (backwardation), sell near / buy far.
+4. **Mean Reversion** — When price displaces from primary High Volume Nodes, buy directional options.
+5. **Gamma Scalp** — When GMM distribution is distinctly multi-modal, buy straddle + delta-hedge.
 
-### GMM Moment Evolution
-- **Sliding window analysis** — Tracks how each Gaussian component's mean, σ, and weight evolve as the data window moves forward
-- **Mixture kurtosis** — Computes excess kurtosis of the full mixture distribution at each window step
-- **MOMENTS tab** — 2×2 grid of charts for D1 and D2: component means, σ, weights, and mixture kurtosis over time
+### 5. Caching & Merging System
+- **Raw-Only Cache** — Session data (candles, option contracts, closed bars) saves locally as `.json`. No computed data is exported, ensuring purity.
+- **Instant Restore** — Uploading a cache file skips all API hits and immediately recomputes GMM and options greeks.
+- **Merge Tool** — Dedicated MERGE tab lets you drag-and-drop multiple cache files. It intelligently dedupes overlapping overlapping candles (by timestamp) and contracts (by ID) to synthesize larger continuous datasets.
 
-## What's New in v2.1
-
-### Bug Fixes & Correctness Improvements
-
-- **Black-Scholes theta** — Fixed sign errors in both call and put theta for dividend-paying stocks
-- **Multi-asset annualization** — Realized vol uses correct factors per asset class: Stocks (252d × 6.5h), Crypto (365d × 24h), Forex (252d × 24h)
-- **Window lookback** — "RV 10d" now correctly converts day-based windows to candle counts (e.g. 10 days × 6.5 = 65 hourly candles)
-- **Weekend/holiday crash** — Option bar lookup now walks backwards to find last trading day instead of hardcoding "yesterday"
-- **Options chain completeness** — Raised contract fetch limit from 250 to 1000 to capture the full chain for liquid assets like SPY
-- **Naked option max-loss** — Corrected from arbitrary `3× credit` to proper theoretical values (unlimited for calls, `strike × 100 − credit` for puts)
-- **Pagination fix** — Polygon pagination no longer sends duplicate `apiKey` query params
-- **GMM component stats** — Skewness/kurtosis now use theoretical Gaussian values (0.0) instead of noisy random sampling
-- **GMM vol display** — Backend summary and frontend metric card now show price-space dispersion as `$5.63` instead of `5802.0%`
-- **IV Surface chart** — Uses `surface` with `connectgaps: true` for dense data, falls back to `scatter3d` markers for sparse chains (e.g. GOOG on free tier)
-- **Return type hint** — `build_distributions` type hint corrected to match 6-item return
-
-### Data Caching & Reprocessing
-
-- **Instant parameter tweaking** — After running vol analysis, change risk-free rate or dividend yield and click **⟳ Reprocess (cached)** to recompute greeks, IV, and signals without re-fetching from Polygon
-- **New `/volatility/reprocess` endpoint** — Accepts cached contracts + bars, skips all API calls
-- **Save / Load cache** — **↓ Save** exports all session data (candles, analysis, contracts, bars, vol results) as a JSON file. **↑ Load** restores it instantly — all tabs (DATA, VOL, SIGNALS, CHARTS) repopulate without any API calls
-- **Rate-limited batching** — Option bar fetching now processes 5 contracts per batch with 13s delays, respecting Polygon free tier (5 req/min). Progress logged to backend terminal
-- **Debug info bar** — VOL tab shows surface point count, unique strikes/expiries, and chain size for troubleshooting
-- **Frontend caching** — Raw option data stored in React state for instant reuse
-
-## Features
-
-### Volatility Engine (self-computed, no paid tier needed)
-- **Black-Scholes pricing** — full implementation with continuous dividends
-- **Implied Volatility** — Brent root-finding on BS model
-- **Greeks** — Delta, Gamma, Theta, Vega, Rho computed analytically
-- **Parkinson volatility** — high-low estimator (more efficient than close-to-close)
-- **Multi-timeframe annualization** — correct factors for 1min through 1week candles
-
-### Options Chain Analysis
-- Fetches all active contracts from Polygon reference endpoint
-- Gets daily bars for each contract (free tier)
-- Enriches every contract with self-computed IV + all greeks
-- Displays full chain with calls/puts side-by-side
-
-### IV Surface & Volatility Metrics
-- **3D IV Surface** — strike × expiry × IV interactive visualization
-- **IV Smile** — grouped by expiry, plotted against moneyness
-- **ATM IV** — near-term and far-term
-- **Term Structure** — contango/backwardation/flat detection
-- **25Δ Put-Call Skew** — fear premium measurement
-- **VRP (Volatility Risk Premium)** — IV minus realized vol at 10d/20d/30d
-- **GMM-enhanced realized vol** — mixture-weighted variance + kurtosis
-
-### Trade Signal Generation (5 strategy types)
-1. **Vol Crush** — When VRP is high, sell premium via short strangles
-2. **Skew Trade** — When put skew exceeds GMM tail risk, sell put credit spreads
-3. **Calendar Spread** — When term structure is inverted, sell near / buy far
-4. **Mean Reversion** — When price is displaced from HVN, buy directional options
-5. **Gamma Scalp** — When GMM shows multi-modal distribution, buy straddle + delta-hedge
-
-Each signal includes:
-- Specific contract legs with tickers
-- Max profit / max loss / probability estimates
-- Net position greeks (Δ, Γ, Θ, ν)
-- Risk/reward ratio and breakeven levels
+### 6. Dynamic UI/UX
+- **Collapsible Sidebar** — The Controls sidebar is draggable/resizable (200px-450px) and collapses into a micro-icon strip to maximize chart space.
+- **Configuration Hub** — A header gear icon ⚙ opens Settings for tweaking batch variables (requests vs delay), option expirations (near/far boundaries), and sliding window ratios.
+- **Theming** — Fully unified dark-mode styling with natively customized WebKit range sliders (`#3b82f6` accents).
 
 ## Setup & Run
 
@@ -147,48 +95,29 @@ npm install
 npm run dev
 ```
 
-### 3. Usage
+### 3. Usage Guide
 
-1. Enter one or more Polygon.io API keys (one per line or comma-separated — more keys = faster fetching)
-2. Enter ticker (e.g. SPY, AAPL, QQQ)
-3. Set date range and timeframe
-4. Optional: toggle **Sync D1/D2** to find a shared GMM N across both distributions
-5. Click **▶ Fetch & Analyze** — runs GMM distribution analysis + moment evolution
-6. Adjust GMM N or bins → click **⟳ Re-Analyze (GMM)** to refit without re-fetching
-7. Click **◈ Run Vol Analysis** — fetches options chain, computes IV surface, generates signals
-8. Tweak risk-free rate or dividend yield → click **⟳ Reprocess (cached)** for instant results
-9. Click **↓ Save** to export raw data cache — reload later with **↑ Load** (auto-recomputes all analysis)
-10. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA | MOMENTS | MERGE
-11. Use **MERGE** tab to combine multiple cache files and download unified data
+1. **Setup**: Paste your Polygon.io API key(s) in the CONNECTION sidebar. More keys = much faster loads.
+2. **Fetch**: Enter a ticker (e.g. SPY, BTCUSD), select a timeframe, and click **▶ Fetch & Analyze**.
+3. **Tweak Analysis**: Slide the Bin/N sliders. Click **⟳ Re-Analyze (GMM)** to instantly update the charts in the CHARTS and MOMENTS tabs.
+4. **Vol Scan**: Click **◈ Run Vol Analysis** to pull the options chain and compute the Volatility Surface and Signals.
+5. **Simulate**: Click the ⚙ icon top right to adjust near/far expiration constraints or edit Dividend/Risk-Free rates in the sidebar, then hit **⟳ Reprocess (cached)**.
+6. **Data Portability**: Click **↓ Save** at the bottom of the sidebar to dump raw data. Use the **MERGE** tab to combine it with older saves.
 
 ## API Endpoints
 
-```
+```text
 GET  /health                   → Health check
 GET  /supported-intervals      → Valid timeframes
-POST /fetch                    → Fetch OHLCV from Polygon
-POST /analyze                  → GMM distribution analysis
-POST /volatility               → Full volatility + options + signals pipeline
-POST /volatility/reprocess     → Reprocess with cached data (no API calls)
+POST /fetch                    → Fetch OHLCV + auto-detects asset class
+POST /analyze                  → GMM distribution + sliding moment evolution
+POST /volatility               → Full vol surface + options + signals pipeline
+POST /volatility/reprocess     → Recalculates greeks + signals instantly (no API)
 ```
 
 ## Limitations & Notes
 
-- **Free tier rate limits**: 5 API calls/min per key. Use multiple keys for faster throughput (N keys → N×5 req/min).
-  The system round-robins across keys and batches requests.
-- **Options data**: Daily bars only on free tier. For real-time bid/ask, upgrade to paid.
-- **IV accuracy**: BS model assumes European exercise. For American options (most US equity options),
-  there's a small pricing discrepancy. The system uses BS as an approximation.
-- **Signal quality**: Signals are mathematically derived from statistical analysis.
-  They are NOT investment advice. Always validate with your own research and risk management.
-- **Volume**: Some option contracts have very low volume. The system filters out contracts
-  where IV cannot be reliably computed.
-- **Weekend/holiday handling**: The system skips weekends when looking up option bars.
-  Market holidays are not explicitly handled — if the most recent weekday was a holiday,
-  the bar lookup may still return empty for some contracts.
-
-## Disclaimer
-
-This tool is for educational and research purposes only. It does not constitute financial advice.
-Options trading involves substantial risk of loss. Past performance does not guarantee future results.
-Always consult a qualified financial advisor before making investment decisions.
+- **Free Tier Rate Limits**: Polygon allows 5 calls/min per key. The settings menu defaults ensure you stay exactly within this limit (`Batch Size`=5, `Delay`=61s). Providing multiple keys automatically scales throughput linearly.
+- **Options Data Limitations**: The free tier provides *daily* closing option bars. Real-time intraday bid/ask spreads require a paid Polygon tier.
+- **IV Accuracy**: Black-Scholes inherently prices European options. For American equity options, there is a minor early-exercise discrepancy, but BS serves as the standard approximation.
+- **Signal Disclaimer**: Generated signals are mathematical indicators derived purely from statistical anomalies (VRP, Skew, KDE multimodality). They are **not** investment advice.

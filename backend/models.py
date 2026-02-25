@@ -45,6 +45,8 @@ class AnalyzeRequest(BaseModel):
     num_bins: int = Field(default=200, ge=50, le=500)
     n_components_override: Optional[int] = Field(default=None, ge=1, le=10)
     sync_gmm: bool = False  # If True, find best N across both D1 and D2
+    moment_window_ratio: int = 5   # window = max(30, candles / ratio)
+    moment_step_ratio: int = 30    # step = max(5, candles / ratio)
 
 
 class GMMComponent(BaseModel):
@@ -223,6 +225,8 @@ class VolatilityRequest(BaseModel):
     far_expiry_min_days: int = 46
     far_expiry_max_days: int = 180
     strike_range_pct: float = 0.15     # +/- 15% from spot
+    batch_size: int = 5                # requests per key per batch
+    batch_delay: int = 61              # seconds between batches
 
 
 class ReprocessRequest(BaseModel):
