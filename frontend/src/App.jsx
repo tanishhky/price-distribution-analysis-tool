@@ -36,7 +36,7 @@ export default function App() {
     try {
       setInfo('Fetching candles from Polygon.io…')
       const fetchResult = await fetchCandles({
-        api_key: params.api_keys[0], ticker: params.ticker, asset_class: params.asset_class,
+        api_keys: params.api_keys, ticker: params.ticker, asset_class: params.asset_class,
         timeframe: params.timeframe, start_date: params.start_date, end_date: params.end_date,
       })
       setCandles(fetchResult.candles)
@@ -52,7 +52,7 @@ export default function App() {
       })
       setAnalysis(analysisResult)
       setOk(`GMM complete — D1: ${analysisResult.gmm_d1.n_components}, D2: ${analysisResult.gmm_d2.n_components} components`)
-    } catch (err) { setErr(err.message) }
+    } catch (err) { setErr(err?.message || String(err)) }
     finally { setLoading(false) }
   }
 
@@ -75,7 +75,7 @@ export default function App() {
       setAnalysis(analysisResult)
       setLastParams(prev => ({ ...prev, num_bins: params.num_bins, n_components_override: params.n_components_override }))
       setOk(`Re-analysis complete — D1: ${analysisResult.gmm_d1.n_components}, D2: ${analysisResult.gmm_d2.n_components} components`)
-    } catch (err) { setErr(err.message) }
+    } catch (err) { setErr(err?.message || String(err)) }
     finally { setLoading(false) }
   }
 
@@ -108,7 +108,7 @@ export default function App() {
       const nContracts = result.volatility_analysis?.chain?.length || 0
       setOk(`Vol analysis complete — ${nContracts} contracts, ${nSignals} signals`)
       setActiveTab('volatility')
-    } catch (err) { setErr(err.message) }
+    } catch (err) { setErr(err?.message || String(err)) }
     finally { setLoading(false) }
   }
 
@@ -141,7 +141,7 @@ export default function App() {
       const nContracts = result.volatility_analysis?.chain?.length || 0
       setOk(`Reprocessed — ${nContracts} contracts, ${nSignals} signals (no API calls)`)
       setActiveTab('volatility')
-    } catch (err) { setErr(err.message) }
+    } catch (err) { setErr(err?.message || String(err)) }
     finally { setLoading(false) }
   }
 

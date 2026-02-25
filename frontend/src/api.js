@@ -1,5 +1,13 @@
 const BASE = '/api'
 
+function extractError(data, fallback) {
+  const d = data?.detail
+  if (!d) return fallback
+  if (typeof d === 'string') return d
+  if (Array.isArray(d)) return d.map(e => e?.msg || JSON.stringify(e)).join('; ')
+  return JSON.stringify(d)
+}
+
 export async function fetchCandles(params) {
   const res = await fetch(`${BASE}/fetch`, {
     method: 'POST',
@@ -7,7 +15,7 @@ export async function fetchCandles(params) {
     body: JSON.stringify(params),
   })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.detail || 'Failed to fetch candles')
+  if (!res.ok) throw new Error(extractError(data, 'Failed to fetch candles'))
   return data
 }
 
@@ -18,7 +26,7 @@ export async function analyzeData(params) {
     body: JSON.stringify(params),
   })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.detail || 'Failed to analyze data')
+  if (!res.ok) throw new Error(extractError(data, 'Failed to analyze data'))
   return data
 }
 
@@ -29,7 +37,7 @@ export async function runVolatilityAnalysis(params) {
     body: JSON.stringify(params),
   })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.detail || 'Volatility analysis failed')
+  if (!res.ok) throw new Error(extractError(data, 'Volatility analysis failed'))
   return data
 }
 
@@ -40,7 +48,7 @@ export async function reprocessVolatility(params) {
     body: JSON.stringify(params),
   })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.detail || 'Reprocessing failed')
+  if (!res.ok) throw new Error(extractError(data, 'Reprocessing failed'))
   return data
 }
 
