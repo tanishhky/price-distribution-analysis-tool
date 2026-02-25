@@ -1,4 +1,4 @@
-# ◈ VolEdge — Volatility Trading System v2.1
+# ◈ VolEdge — Volatility Trading System v3.0
 
 A full-stack quantitative trading platform that combines **price distribution analysis** (GMM)
 with **options volatility analysis** and **automated trade signal generation**.
@@ -13,7 +13,7 @@ price-distribution-tool/
 │   ├── main.py                 # FastAPI — all endpoints
 │   ├── polygon_client.py       # Polygon.io stock/crypto/forex OHLCV
 │   ├── options_client.py       # Polygon.io options contracts + bars
-│   ├── analysis.py             # D1, D2 distributions + GMM
+│   ├── analysis.py             # D1, D2 distributions + GMM + moment evolution
 │   ├── volatility_engine.py    # Black-Scholes, IV, VRP, signal generation
 │   ├── models.py               # Pydantic data models
 │   └── requirements.txt
@@ -23,14 +23,16 @@ price-distribution-tool/
 │   │   ├── App.jsx
 │   │   ├── api.js
 │   │   └── components/
-│   │       ├── Controls.jsx          # Sidebar with all params + reprocess
+│   │       ├── Controls.jsx          # Sidebar: multi-key, GMM params, sync toggle
 │   │       ├── CandlestickChart.jsx  # OHLCV + volume
 │   │       ├── DistributionChart.jsx # D1/D2 histogram + KDE
 │   │       ├── GMMChart.jsx          # GMM decomposition
 │   │       ├── ComparisonChart.jsx   # D1 vs D2 overlay
 │   │       ├── VolatilityPanel.jsx   # IV surface, vol compare, chain table
 │   │       ├── SignalsPanel.jsx      # Trade signals with legs + greeks
-│   │       └── ResultsPanel.jsx      # Textual output + tables
+│   │       ├── ResultsPanel.jsx      # Textual output + tables
+│   │       ├── MomentsChart.jsx      # 2×2 moment evolution charts
+│   │       └── MergePanel.jsx        # Cache file merger with dedup
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
@@ -147,14 +149,17 @@ npm run dev
 
 ### 3. Usage
 
-1. Enter Polygon.io API key (free tier works)
+1. Enter one or more Polygon.io API keys (one per line or comma-separated — more keys = faster fetching)
 2. Enter ticker (e.g. SPY, AAPL, QQQ)
 3. Set date range and timeframe
-4. Click **▶ Fetch & Analyze** — runs GMM distribution analysis
-5. Click **◈ Run Vol Analysis** — fetches options chain, computes IV surface, generates signals
-6. Tweak risk-free rate or dividend yield → click **⟳ Reprocess (cached)** for instant results
-7. Click **↓ Save** to export session cache as JSON — reload later with **↑ Load** (zero API calls)
-8. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA
+4. Optional: toggle **Sync D1/D2** to find a shared GMM N across both distributions
+5. Click **▶ Fetch & Analyze** — runs GMM distribution analysis + moment evolution
+6. Adjust GMM N or bins → click **⟳ Re-Analyze (GMM)** to refit without re-fetching
+7. Click **◈ Run Vol Analysis** — fetches options chain, computes IV surface, generates signals
+8. Tweak risk-free rate or dividend yield → click **⟳ Reprocess (cached)** for instant results
+9. Click **↓ Save** to export raw data cache — reload later with **↑ Load** (auto-recomputes all analysis)
+10. Navigate tabs: CHARTS | PROFILE | VOL | SIGNALS | DATA | MOMENTS | MERGE
+11. Use **MERGE** tab to combine multiple cache files and download unified data
 
 ## API Endpoints
 
@@ -169,8 +174,8 @@ POST /volatility/reprocess     → Reprocess with cached data (no API calls)
 
 ## Limitations & Notes
 
-- **Free tier rate limits**: 5 API calls/min. Options chain fetching may be slow for large chains.
-  The system batches requests and skips contracts that fail.
+- **Free tier rate limits**: 5 API calls/min per key. Use multiple keys for faster throughput (N keys → N×5 req/min).
+  The system round-robins across keys and batches requests.
 - **Options data**: Daily bars only on free tier. For real-time bid/ask, upgrade to paid.
 - **IV accuracy**: BS model assumes European exercise. For American options (most US equity options),
   there's a small pricing discrepancy. The system uses BS as an approximation.

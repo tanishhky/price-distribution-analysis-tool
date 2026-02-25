@@ -165,7 +165,7 @@ export default function App() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `voledge_${payload.ticker}_${payload.saved_at.slice(0, 10)}.json`
+    a.download = `voledge_${payload.ticker}_${payload.timeframe}_${payload.start_date}_${payload.end_date}.json`
     a.click()
     URL.revokeObjectURL(url)
     setOk(`Cache exported — raw data only (${(blob.size / 1024).toFixed(0)} KB)`)

@@ -125,7 +125,7 @@ export default function MergePanel() {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `voledge_${mergeResult.data.ticker}_merged_${mergeResult.data.saved_at.slice(0, 10)}.json`
+        a.download = `voledge_${mergeResult.data.ticker}_${mergeResult.data.timeframe}_${mergeResult.stats.startDate}_${mergeResult.stats.endDate}.json`
         a.click()
         URL.revokeObjectURL(url)
     }
