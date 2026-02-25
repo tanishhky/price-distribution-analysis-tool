@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import Controls from './components/Controls'
 import CandlestickChart from './components/CandlestickChart'
 import DistributionChart from './components/DistributionChart'
@@ -26,9 +26,17 @@ export default function App() {
   const [cachedContracts, setCachedContracts] = useState(null)
   const [cachedBars, setCachedBars] = useState(null)
 
+  // FIX v3.1: Track current GMM params so cache upload uses them consistently
+  const gmmParamsRef = useRef({ num_bins: 200, n_components_override: null, sync_gmm: false })
+
   const setErr = (msg) => setStatus({ type: 'error', message: msg })
   const setInfo = (msg) => setStatus({ type: 'info', message: msg })
   const setOk = (msg) => setStatus({ type: 'success', message: msg })
+
+  // Called by Controls whenever GMM params change
+  const handleGmmParamsChange = (params) => {
+    gmmParamsRef.current = params
+  }
 
   const handleFetchAndAnalyze = async (params) => {
     setLoading(true)
@@ -101,7 +109,6 @@ export default function App() {
         strike_range_pct: volParams.strike_range_pct,
       })
       setVolData(result)
-      // Cache the raw data for reprocessing
       setCachedContracts(result.cached_contracts || null)
       setCachedBars(result.cached_bars || null)
       const nSignals = result.trade_signals?.length || 0
@@ -149,6 +156,7 @@ export default function App() {
     if (!candles) {
       return setErr('No data to download. Run Fetch & Analyze first.')
     }
+    // FIX v3.1: Cache file stores ONLY raw data — no computed analysis
     const payload = {
       _version: 3,
       ticker: lastParams?.fetchResult?.ticker || analysis?.ticker || 'UNKNOWN',
@@ -195,9 +203,10 @@ export default function App() {
           },
         }))
 
-        // Auto re-analyze from raw candles
+        // FIX v3.1: Auto re-analyze using CURRENT sidebar GMM params (not hardcoded)
+        const gmmP = gmmParamsRef.current
         setLoading(true)
-        setInfo(`Cache loaded: ${data.ticker}. Re-computing GMM analysis…`)
+        setInfo(`Cache loaded: ${data.ticker}. Re-computing GMM analysis (N=${gmmP.n_components_override || 'Auto'}, Sync=${gmmP.sync_gmm})…`)
         try {
           const analysisResult = await analyzeData({
             ticker: data.ticker || 'UNKNOWN',
@@ -206,7 +215,9 @@ export default function App() {
             start_date: data.start_date || '',
             end_date: data.end_date || '',
             candles: data.candles,
-            num_bins: 200,
+            num_bins: gmmP.num_bins,
+            n_components_override: gmmP.n_components_override,
+            sync_gmm: gmmP.sync_gmm,
           })
           setAnalysis(analysisResult)
 
@@ -261,6 +272,7 @@ export default function App() {
         onReprocess={handleReprocess}
         onDownloadCache={handleDownloadCache}
         onUploadCache={handleUploadCache}
+        onGmmParamsChange={handleGmmParamsChange}
         hasCandles={!!candles}
         hasVolCache={!!(cachedContracts && cachedBars)}
         loading={loading}

@@ -70,74 +70,104 @@ def build_distributions(
 # Step 2: Gaussian Mixture Model fitting
 # ─────────────────────────────────────────────
 
+def _density_to_samples(bin_centers: np.ndarray, density: np.ndarray, total_samples: int = 5000) -> np.ndarray:
+    """Convert density histogram to weighted samples for GMM fitting."""
+    bin_width = bin_centers[1] - bin_centers[0] if len(bin_centers) > 1 else 1.0
+    counts = np.round(density * bin_width * total_samples).astype(int)
+    counts = np.maximum(counts, 0)
+    samples = np.repeat(bin_centers, counts).reshape(-1, 1)
+    return samples
+
+
 def fit_gmm(
     bin_centers: np.ndarray,
     density: np.ndarray,
     n_components_override: Optional[int] = None,
     max_components: int = 10,
 ) -> GMMResult:
+    """
+    Fit a Gaussian Mixture Model to a density distribution.
+
+    FIX: Always compute BIC scores across 1..max_components regardless of override.
+    This ensures the DATA tab always shows the full BIC landscape even when user
+    manually sets N, allowing them to see how their choice compares to the optimal.
+    """
     total_samples = 5000
-    bin_width = bin_centers[1] - bin_centers[0] if len(bin_centers) > 1 else 1.0
-    counts = np.round(density * bin_width * total_samples).astype(int)
-    counts = np.maximum(counts, 0)
-    samples = np.repeat(bin_centers, counts).reshape(-1, 1)
+    samples = _density_to_samples(bin_centers, density, total_samples)
 
     if len(samples) < 2:
         raise ValueError("Insufficient data to fit GMM.")
 
-    bic_scores: Dict[str, float] = {}
-    best_bic = np.inf
-    best_gmm = None
-    best_n = 1
+    max_n = min(max_components, len(np.unique(samples.ravel())))
 
-    n_range = range(1, min(max_components, len(np.unique(samples))) + 1)
+    # ALWAYS compute BIC scores for all N values (transparency)
+    bic_scores = {}
+    best_bic_n = 1
+    best_bic_val = np.inf
 
-    for n in n_range:
+    for n in range(1, max_n + 1):
         try:
-            gmm = GaussianMixture(
+            gm = GaussianMixture(
                 n_components=n, covariance_type='full',
                 max_iter=500, n_init=5, random_state=42,
             )
-            gmm.fit(samples)
-            bic = gmm.bic(samples)
+            gm.fit(samples)
+            bic = gm.bic(samples)
             bic_scores[str(n)] = round(float(bic), 2)
-            if bic < best_bic:
-                best_bic = bic
-                best_gmm = gmm
-                best_n = n
+            if bic < best_bic_val:
+                best_bic_val = bic
+                best_bic_n = n
         except Exception:
             continue
 
-    if n_components_override is not None and n_components_override != best_n:
-        try:
-            override_gmm = GaussianMixture(
-                n_components=n_components_override, covariance_type='full',
-                max_iter=500, n_init=5, random_state=42,
-            )
-            override_gmm.fit(samples)
-            best_gmm = override_gmm
-            best_n = n_components_override
-        except Exception:
-            pass
+    # Determine final N: user override takes precedence, else BIC-optimal
+    if n_components_override is not None and n_components_override >= 1:
+        best_n = min(n_components_override, max_n)
+    else:
+        best_n = best_bic_n
 
-    x_eval = np.linspace(bin_centers.min(), bin_centers.max(), 1000)
-    fitted_total = np.zeros(len(x_eval))
+    # Fit final model with chosen N
+    gmm = GaussianMixture(
+        n_components=best_n, covariance_type='full',
+        max_iter=500, n_init=5, random_state=42,
+    )
+    gmm.fit(samples)
+
+    # Build output
+    means = gmm.means_.ravel()
+    covs = gmm.covariances_.ravel() if gmm.covariances_.ndim == 1 else gmm.covariances_.reshape(-1)
+    weights = gmm.weights_
+
+    # Handle covariance shape: 'full' gives (n, 1, 1) → flatten properly
+    variances = []
+    for i in range(best_n):
+        cov = gmm.covariances_[i]
+        if cov.ndim == 2:
+            variances.append(float(cov[0, 0]))
+        elif cov.ndim == 1:
+            variances.append(float(cov[0]))
+        else:
+            variances.append(float(cov))
+
+    # Sort by mean (ascending price order)
+    order = np.argsort(means)
+
+    x_eval = np.linspace(bin_centers.min(), bin_centers.max(), 500)
+    fitted_total = np.zeros_like(x_eval)
+    components = []
     component_curves = []
-    components: List[GMMComponent] = []
-
-    order = np.argsort(best_gmm.means_.ravel())
 
     for rank, idx in enumerate(order):
-        weight  = float(best_gmm.weights_[idx])
-        mean    = float(best_gmm.means_[idx][0])
-        var     = float(best_gmm.covariances_[idx][0][0])
-        std_dev = float(np.sqrt(var))
+        mean = float(means[idx])
+        var = variances[idx]
+        std_dev = float(np.sqrt(var)) if var > 0 else 1e-8
+        weight = float(weights[idx])
 
+        # Component PDF (weighted)
         comp_y = weight * stats.norm.pdf(x_eval, loc=mean, scale=std_dev)
         fitted_total += comp_y
 
-        # Individual Gaussian components have skewness=0 and excess kurtosis=0
-        # by definition; no need to estimate via random sampling.
+        # Gaussian components have 0 skewness and 0 excess kurtosis by definition
         skewness = 0.0
         kurtosis = 0.0
 
@@ -182,19 +212,16 @@ def fit_synced_gmm(
     then fit both distributions with that shared N.
     """
     total_samples = 5000
-    bin_width = bin_centers[1] - bin_centers[0] if len(bin_centers) > 1 else 1.0
 
-    d1_counts = np.maximum(np.round(d1_density * bin_width * total_samples).astype(int), 0)
-    d2_counts = np.maximum(np.round(d2_density * bin_width * total_samples).astype(int), 0)
-    d1_samples = np.repeat(bin_centers, d1_counts).reshape(-1, 1)
-    d2_samples = np.repeat(bin_centers, d2_counts).reshape(-1, 1)
+    d1_samples = _density_to_samples(bin_centers, d1_density, total_samples)
+    d2_samples = _density_to_samples(bin_centers, d2_density, total_samples)
 
     if len(d1_samples) < 2 or len(d2_samples) < 2:
         raise ValueError("Insufficient data for synced GMM.")
 
     max_n = min(max_components,
-                len(np.unique(d1_samples)),
-                len(np.unique(d2_samples)))
+                len(np.unique(d1_samples.ravel())),
+                len(np.unique(d2_samples.ravel())))
 
     best_n = 1
     best_combined_bic = np.inf
@@ -229,6 +256,13 @@ def compute_moment_evolution(
     """
     Slide a window across candles, fit GMM at each step.
     Track per-component (mean, sigma, weight) + mixture kurtosis over time.
+
+    FIX: When n_components is provided, always use it consistently for every window.
+    When n_components is None AND sync_gmm is True, determine N from first window
+    via synced BIC, then use that N for all subsequent windows.
+    When n_components is None AND sync_gmm is False, determine N from first window
+    via individual BIC for D1, then use that N for all subsequent windows.
+
     Returns:
       { timestamps: [...], d1: { components: [{mean:[], sigma:[], weight:[]}], mixture_kurtosis:[] },
         d2: { ... } }
@@ -241,10 +275,10 @@ def compute_moment_evolution(
     d1_data: Dict[str, Any] = {"components": [], "mixture_kurtosis": []}
     d2_data: Dict[str, Any] = {"components": [], "mixture_kurtosis": []}
 
-    # Determine fixed N from first window if not set
-    first_window = candles[:window_size]
-    _, _, d1_raw, d2_raw, bc, _ = build_distributions(first_window, num_bins)
-    if n_components is None:
+    # Determine fixed N from first window if not explicitly set
+    if n_components is None or n_components < 1:
+        first_window = candles[:window_size]
+        _, _, d1_raw, d2_raw, bc, _ = build_distributions(first_window, num_bins)
         if sync_gmm:
             _, _, n_components = fit_synced_gmm(np.array(bc), d1_raw, d2_raw)
         else:
@@ -274,7 +308,6 @@ def compute_moment_evolution(
                     dist_data["components"][i]["weight"].append(comp.weight)
 
                 # Mixture kurtosis: excess kurtosis of the full mixture PDF
-                # Use moment formula: κ = (Σ w_i * (σ_i^4 + ... )) / σ_mix^4 - 3
                 weights = np.array([c.weight for c in gmm.components])
                 means = np.array([c.mean for c in gmm.components])
                 sigmas = np.array([c.std_dev for c in gmm.components])
@@ -301,6 +334,7 @@ def compute_moment_evolution(
                 dist_data["mixture_kurtosis"].append(None)
 
     return {"timestamps": timestamps, "d1": d1_data, "d2": d2_data}
+
 
 # ─────────────────────────────────────────────
 # Results text generator

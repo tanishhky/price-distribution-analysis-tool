@@ -1,6 +1,8 @@
 import httpx
+import asyncio
 from typing import List, Tuple
 from models import Candle
+from datetime import datetime, timedelta
 
 POLYGON_BASE = "https://api.polygon.io"
 
@@ -14,6 +16,8 @@ TIMEFRAME_MAP = {
     "1day":  (1, "day"),
     "1week": (1, "week"),
 }
+
+SUPPORTED_INTERVALS = list(TIMEFRAME_MAP.keys())
 
 
 def detect_asset_class(ticker: str) -> str:
@@ -108,8 +112,110 @@ async def fetch_candles(
     return candles
 
 
-SUPPORTED_INTERVALS = {
-    "stocks": ["1min", "5min", "15min", "30min", "1hour", "4hour", "1day", "1week"],
-    "crypto": ["1min", "5min", "15min", "30min", "1hour", "4hour", "1day", "1week"],
-    "forex":  ["1min", "5min", "15min", "30min", "1hour", "4hour", "1day", "1week"],
-}
+# ═══════════════════════════════════════════════
+#  MULTI-KEY PARALLEL CANDLE FETCHING
+# ═══════════════════════════════════════════════
+
+def _split_date_range(start_date: str, end_date: str, n_chunks: int) -> List[Tuple[str, str]]:
+    """
+    Split a date range into n_chunks roughly equal sub-ranges.
+    Returns list of (start, end) ISO date strings.
+    """
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    total_days = (end - start).days
+
+    if total_days <= 0 or n_chunks <= 1:
+        return [(start_date, end_date)]
+
+    chunk_days = max(1, total_days // n_chunks)
+    ranges = []
+    current = start
+
+    for i in range(n_chunks):
+        chunk_start = current
+        if i == n_chunks - 1:
+            # Last chunk gets the remainder
+            chunk_end = end
+        else:
+            chunk_end = current + timedelta(days=chunk_days - 1)
+            if chunk_end > end:
+                chunk_end = end
+
+        ranges.append((chunk_start.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")))
+        current = chunk_end + timedelta(days=1)
+
+        if current > end:
+            break
+
+    return ranges
+
+
+async def _fetch_chunk(
+    api_key: str, ticker: str, asset_class: str,
+    timeframe: str, start_date: str, end_date: str,
+    rate_limit_delay: float = 12.5,
+) -> List[Candle]:
+    """
+    Fetch one date-range chunk with a single API key.
+    Includes a pre-request delay to respect rate limits (5 req/min/key).
+    """
+    await asyncio.sleep(rate_limit_delay)
+    return await fetch_candles(api_key, ticker, asset_class, timeframe, start_date, end_date)
+
+
+async def fetch_candles_parallel(
+    api_keys: List[str],
+    ticker: str,
+    asset_class: str,
+    timeframe: str,
+    start_date: str,
+    end_date: str,
+) -> List[Candle]:
+    """
+    Fetch candles using multiple API keys in parallel.
+    Splits the date range into chunks (one per key) and fetches concurrently.
+    Deduplicates by timestamp and returns sorted candles.
+
+    If only 1 key is provided, falls back to simple sequential fetch.
+    """
+    n_keys = len(api_keys)
+
+    if n_keys <= 1:
+        return await fetch_candles(api_keys[0], ticker, asset_class, timeframe, start_date, end_date)
+
+    # Split date range across keys
+    date_chunks = _split_date_range(start_date, end_date, n_keys)
+
+    # Launch parallel fetches — each key handles one chunk
+    tasks = []
+    for i, (chunk_start, chunk_end) in enumerate(date_chunks):
+        key = api_keys[i % n_keys]
+        # Stagger start times slightly to avoid hitting the API simultaneously
+        tasks.append(
+            _fetch_chunk(key, ticker, asset_class, timeframe, chunk_start, chunk_end,
+                         rate_limit_delay=i * 0.5)  # Small stagger, not full rate limit
+        )
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Collect all candles, handling any failures gracefully
+    all_candles: List[Candle] = []
+    errors = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            errors.append(f"Chunk {i} failed: {result}")
+        else:
+            all_candles.extend(result)
+
+    if not all_candles and errors:
+        raise RuntimeError(f"All parallel fetches failed: {'; '.join(errors)}")
+
+    # Deduplicate by timestamp and sort
+    seen = {}
+    for c in all_candles:
+        if c.timestamp not in seen:
+            seen[c.timestamp] = c
+
+    deduped = sorted(seen.values(), key=lambda c: c.timestamp)
+    return deduped

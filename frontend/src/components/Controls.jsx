@@ -1,11 +1,15 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 
 const TIMEFRAMES = ['1min', '5min', '15min', '30min', '1hour', '4hour', '1day', '1week']
 const ASSET_CLASSES = ['auto', 'stocks', 'crypto', 'forex']
 const HINTS = { auto: 'AAPL, X:BTCUSD, C:EURUSD', stocks: 'AAPL, SPY, TSLA', crypto: 'BTCUSD, X:ETHUSD', forex: 'EURUSD, C:GBPJPY' }
 const MONO = "'JetBrains Mono', monospace"
 
-export default function Controls({ onFetchAndAnalyze, onReAnalyze, onRunVolatility, onReprocess, onDownloadCache, onUploadCache, hasCandles, hasVolCache, loading, status }) {
+export default function Controls({
+  onFetchAndAnalyze, onReAnalyze, onRunVolatility, onReprocess,
+  onDownloadCache, onUploadCache, onGmmParamsChange,
+  hasCandles, hasVolCache, loading, status,
+}) {
   const fileInputRef = useRef(null)
   const [apiKeyInput, setApiKeyInput] = useState(() => sessionStorage.getItem('polygon_api_keys') || '')
   const [ticker, setTicker] = useState('SPY')
@@ -23,9 +27,20 @@ export default function Controls({ onFetchAndAnalyze, onReAnalyze, onRunVolatili
   const [collapsed, setCollapsed] = useState({})
 
   const handleApiKeyInput = (v) => { setApiKeyInput(v); sessionStorage.setItem('polygon_api_keys', v) }
-  const parseKeys = () => apiKeyInput.split(/[,;\n]+/).map(k => k.trim()).filter(Boolean)
+  const parseKeys = () => apiKeyInput.split(/[,;\n\s]+/).map(k => k.trim()).filter(Boolean)
 
   const toggle = (key) => setCollapsed(p => ({ ...p, [key]: !p[key] }))
+
+  // FIX v3.1: Notify App of GMM param changes so cache uploads use current settings
+  useEffect(() => {
+    if (onGmmParamsChange) {
+      onGmmParamsChange({
+        num_bins: numBins,
+        n_components_override: nComponents === 0 ? null : nComponents,
+        sync_gmm: syncGmm,
+      })
+    }
+  }, [numBins, nComponents, syncGmm, onGmmParamsChange])
 
   const handleSubmit = () => {
     const keys = parseKeys()
@@ -64,19 +79,20 @@ export default function Controls({ onFetchAndAnalyze, onReAnalyze, onRunVolatili
       <div style={S.brand}>
         <span style={S.brandIcon}>◈</span>
         <span style={S.brandName}>VolEdge</span>
-        <span style={S.version}>v3.0</span>
+        <span style={S.version}>v3.1</span>
       </div>
 
       <div style={S.scrollArea}>
         {/* API Key */}
         <Section title="CONNECTION" id="conn" collapsed={collapsed} toggle={toggle}>
           <textarea value={apiKeyInput} onChange={e => handleApiKeyInput(e.target.value)}
-            placeholder="Polygon.io API key(s) — one per line or comma-separated"
+            placeholder="Polygon.io API key(s) — one per line, comma, or space separated"
             rows={2}
             style={{ ...S.input, resize: 'vertical', minHeight: 32 }} />
-          {parseKeys().length > 1 && (
-            <div style={{ fontSize: 10, color: '#22c55e', fontFamily: "'JetBrains Mono', monospace", marginTop: 3 }}>
-              {parseKeys().length} keys detected — {parseKeys().length * 5} req/min
+          {parseKeys().length > 0 && (
+            <div style={{ fontSize: 10, color: parseKeys().length > 1 ? '#22c55e' : '#6b7280', fontFamily: MONO, marginTop: 3 }}>
+              {parseKeys().length} key{parseKeys().length > 1 ? 's' : ''} detected
+              {parseKeys().length > 1 && ` — ${parseKeys().length * 5} req/min`}
             </div>
           )}
           <a href="https://polygon.io/dashboard/signup" target="_blank" rel="noreferrer" style={S.link}>
@@ -224,7 +240,7 @@ export default function Controls({ onFetchAndAnalyze, onReAnalyze, onRunVolatili
 
         {status && (
           <div style={{ ...S.statusBox, borderLeftColor: status.type === 'error' ? '#ef4444' : status.type === 'success' ? '#22c55e' : '#3b82f6' }}>
-            <span style={{ fontSize: 11, color: status.type === 'error' ? '#fca5a5' : '#d1d5db', fontFamily: "'JetBrains Mono', monospace" }}>
+            <span style={{ fontSize: 11, color: status.type === 'error' ? '#fca5a5' : '#d1d5db', fontFamily: MONO }}>
               {status.message}
             </span>
           </div>
@@ -266,8 +282,8 @@ const S = {
     borderBottom: '1px solid #1a1d25',
   },
   brandIcon: { color: '#3b82f6', fontSize: 18, fontWeight: 700 },
-  brandName: { color: '#e5e7eb', fontSize: 15, fontWeight: 700, letterSpacing: 0.5, fontFamily: "'JetBrains Mono', monospace" },
-  version: { color: '#4b5563', fontSize: 10, fontFamily: "'JetBrains Mono', monospace", marginLeft: 'auto', background: '#1a1d25', padding: '2px 6px', borderRadius: 3 },
+  brandName: { color: '#e5e7eb', fontSize: 15, fontWeight: 700, letterSpacing: 0.5, fontFamily: MONO },
+  version: { color: '#4b5563', fontSize: 10, fontFamily: MONO, marginLeft: 'auto', background: '#1a1d25', padding: '2px 6px', borderRadius: 3 },
   scrollArea: { flex: 1, overflowY: 'auto', padding: '8px 12px 16px' },
   section: { marginBottom: 4 },
   sectionHeader: {
@@ -277,20 +293,20 @@ const S = {
   },
   sectionTitle: {
     fontSize: 10, fontWeight: 600, color: '#6b7280', letterSpacing: 1.2,
-    fontFamily: "'JetBrains Mono', monospace",
+    fontFamily: MONO,
   },
   chevron: { color: '#4b5563', fontSize: 10, transition: 'transform 0.15s' },
   sectionBody: { padding: '6px 0 4px' },
-  label: { fontSize: 11, color: '#9ca3af', marginBottom: 3, marginTop: 6, fontFamily: "'JetBrains Mono', monospace" },
+  label: { fontSize: 11, color: '#9ca3af', marginBottom: 3, marginTop: 6, fontFamily: MONO },
   input: {
     width: '100%', background: '#151820', border: '1px solid #1e2230',
     borderRadius: 4, color: '#e5e7eb', padding: '5px 8px', fontSize: 12,
-    fontFamily: "'JetBrains Mono', monospace",
+    fontFamily: MONO,
   },
   select: {
     width: '100%', background: '#151820', border: '1px solid #1e2230',
     borderRadius: 4, color: '#e5e7eb', padding: '5px 8px', fontSize: 12,
-    fontFamily: "'JetBrains Mono', monospace", cursor: 'pointer',
+    fontFamily: MONO, cursor: 'pointer',
   },
   slider: { width: '100%', accentColor: '#3b82f6', cursor: 'pointer', height: 4 },
   toggleRow: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0' },
@@ -304,16 +320,16 @@ const S = {
   tfBtn: {
     background: '#151820', border: '1px solid #1e2230', borderRadius: 3,
     color: '#9ca3af', padding: '3px 0', fontSize: 10, cursor: 'pointer',
-    fontFamily: "'JetBrains Mono', monospace", textAlign: 'center',
+    fontFamily: MONO, textAlign: 'center',
     transition: 'all 0.12s',
   },
   tfActive: { background: '#1e3a5f', border: '1px solid #3b82f6', color: '#60a5fa' },
-  hint: { fontSize: 10, color: '#4b5563', marginTop: 3, fontFamily: "'JetBrains Mono', monospace" },
-  link: { fontSize: 10, color: '#3b82f6', textDecoration: 'none', display: 'block', marginTop: 4, fontFamily: "'JetBrains Mono', monospace" },
+  hint: { fontSize: 10, color: '#4b5563', marginTop: 3, fontFamily: MONO },
+  link: { fontSize: 10, color: '#3b82f6', textDecoration: 'none', display: 'block', marginTop: 4, fontFamily: MONO },
   btn: {
     width: '100%', border: 'none', borderRadius: 4, padding: '8px 0',
     fontSize: 12, fontWeight: 600, cursor: 'pointer',
-    fontFamily: "'JetBrains Mono', monospace", transition: 'all 0.15s',
+    fontFamily: MONO, transition: 'all 0.15s',
     letterSpacing: 0.3,
   },
   btnPrimary: { background: '#1d4ed8', color: '#fff' },
@@ -333,7 +349,7 @@ const S = {
   cacheBtn: {
     flex: 1, background: '#151820', border: '1px solid #1e2230',
     borderRadius: 3, color: '#9ca3af', padding: '4px 0', fontSize: 10,
-    cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace",
+    cursor: 'pointer', fontFamily: MONO,
     textAlign: 'center', transition: 'all 0.12s',
   },
   cacheBtnDisabled: { opacity: 0.3, cursor: 'not-allowed' },

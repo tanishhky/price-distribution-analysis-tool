@@ -9,7 +9,10 @@ from models import (
     VolatilityRequest, VolatilityResponse, VolatilityAnalysis,
     OptionsChainRequest, OptionContractWithGreeks, ReprocessRequest,
 )
-from polygon_client import fetch_candles, detect_asset_class, normalize_ticker, SUPPORTED_INTERVALS
+from polygon_client import (
+    fetch_candles, fetch_candles_parallel,
+    detect_asset_class, normalize_ticker, SUPPORTED_INTERVALS,
+)
 from options_client import (
     fetch_options_contracts, fetch_option_daily_bar,
     fetch_previous_close, fetch_option_last_trade, fetch_option_last_quote,
@@ -21,7 +24,7 @@ from volatility_engine import (
     generate_signals, generate_vol_summary, _candles_per_day,
 )
 
-app = FastAPI(title="Price Distribution & Volatility Analysis API", version="3.0.0")
+app = FastAPI(title="Price Distribution & Volatility Analysis API", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +37,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "price-distribution-vol-tool", "version": "2.0.0"}
+    return {"status": "ok", "service": "price-distribution-vol-tool", "version": "3.1.0"}
 
 
 @app.get("/supported-intervals")
@@ -46,19 +49,40 @@ async def supported_intervals():
 
 @app.post("/fetch", response_model=FetchResponse)
 async def fetch(req: FetchRequest):
+    """
+    Fetch OHLCV candles from Polygon.
+
+    FIX v3.1: When multiple API keys are provided, splits the date range
+    across keys and fetches chunks in parallel for faster throughput.
+    Single-key requests use the original sequential fetch.
+    """
     try:
         asset_class = req.asset_class
         if asset_class == "auto":
             asset_class = detect_asset_class(req.ticker)
 
-        candles = await fetch_candles(
-            api_key=req.api_keys[0],
-            ticker=req.ticker,
-            asset_class=asset_class,
-            timeframe=req.timeframe,
-            start_date=req.start_date,
-            end_date=req.end_date,
-        )
+        n_keys = len(req.api_keys)
+
+        if n_keys > 1:
+            # Parallel multi-key fetch
+            candles = await fetch_candles_parallel(
+                api_keys=req.api_keys,
+                ticker=req.ticker,
+                asset_class=asset_class,
+                timeframe=req.timeframe,
+                start_date=req.start_date,
+                end_date=req.end_date,
+            )
+        else:
+            # Single key — sequential
+            candles = await fetch_candles(
+                api_key=req.api_keys[0],
+                ticker=req.ticker,
+                asset_class=asset_class,
+                timeframe=req.timeframe,
+                start_date=req.start_date,
+                end_date=req.end_date,
+            )
 
         if len(candles) == 0:
             raise HTTPException(status_code=404, detail=f"No data for {req.ticker}.")
@@ -77,6 +101,17 @@ async def fetch(req: FetchRequest):
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest):
+    """
+    GMM distribution analysis.
+
+    FIX v3.1: Consistent N handling across main GMM fit and moment evolution.
+    - When sync_gmm=True AND n_components_override is None: find best shared N via combined BIC
+    - When sync_gmm=True AND n_components_override is set: use override N for both (sync is moot)
+    - When sync_gmm=False AND n_components_override is None: auto BIC per distribution
+    - When sync_gmm=False AND n_components_override is set: use override N for both
+
+    Moment evolution always uses the SAME N as the main GMM fit.
+    """
     try:
         if len(req.candles) < 5:
             raise HTTPException(status_code=400, detail="Need at least 5 candles.")
@@ -85,14 +120,27 @@ async def analyze(req: AnalyzeRequest):
             candles=req.candles, num_bins=req.num_bins,
         )
 
+        # Determine the effective N for moment evolution
+        effective_n_for_moments = None  # None = let moment evolution auto-detect
+
         if req.sync_gmm and req.n_components_override is None:
+            # Sync mode, auto N — find best shared N
             gmm_d1, gmm_d2, synced_n = fit_synced_gmm(
                 bin_centers=np.array(bin_centers), d1_density=d1_raw, d2_density=d2_raw)
-        else:
+            effective_n_for_moments = synced_n
+        elif req.n_components_override is not None and req.n_components_override >= 1:
+            # Manual override — use it for both, regardless of sync toggle
             gmm_d1 = fit_gmm(bin_centers=np.array(bin_centers), density=d1_raw,
                               n_components_override=req.n_components_override)
             gmm_d2 = fit_gmm(bin_centers=np.array(bin_centers), density=d2_raw,
                               n_components_override=req.n_components_override)
+            effective_n_for_moments = req.n_components_override
+        else:
+            # Auto, independent per distribution
+            gmm_d1 = fit_gmm(bin_centers=np.array(bin_centers), density=d1_raw)
+            gmm_d2 = fit_gmm(bin_centers=np.array(bin_centers), density=d2_raw)
+            # Use D1's auto N for moment evolution consistency
+            effective_n_for_moments = gmm_d1.n_components
 
         results_text = generate_results_text(
             ticker=req.ticker, asset_class=req.asset_class, timeframe=req.timeframe,
@@ -101,13 +149,13 @@ async def analyze(req: AnalyzeRequest):
             gmm_d1=gmm_d1, gmm_d2=gmm_d2,
         )
 
-        # Compute moment evolution (sliding window)
+        # Compute moment evolution (sliding window) with the SAME N
         moment_evo = compute_moment_evolution(
             candles=req.candles,
             window_size=max(30, len(req.candles) // 5),
             step_size=max(5, len(req.candles) // 30),
             num_bins=req.num_bins,
-            n_components=gmm_d1.n_components,
+            n_components=effective_n_for_moments,
             sync_gmm=req.sync_gmm,
         )
 
@@ -124,7 +172,7 @@ async def analyze(req: AnalyzeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── NEW: Volatility Analysis endpoint ──
+# ── Volatility Analysis endpoint ──
 
 @app.post("/volatility", response_model=VolatilityResponse)
 async def volatility_analysis(req: VolatilityRequest):
@@ -136,6 +184,8 @@ async def volatility_analysis(req: VolatilityRequest):
     4. Build IV surface
     5. Compare IV vs realized vol (VRP)
     6. Generate trade signals
+
+    FIX v3.1: Uses multiple API keys for option bar fetching (round-robin batching).
     """
     try:
         today = date.today()
@@ -145,7 +195,6 @@ async def volatility_analysis(req: VolatilityRequest):
             raise HTTPException(status_code=400, detail="Invalid spot price")
 
         # ── Step 1: Compute realized volatility from candles ──
-        # Convert day-based windows to candle counts based on timeframe
         cpd = _candles_per_day(req.timeframe, req.asset_class)
         w10 = max(2, int(10 * cpd))
         w20 = max(2, int(20 * cpd))
@@ -158,7 +207,6 @@ async def volatility_analysis(req: VolatilityRequest):
         rv_60 = compute_realized_vol(req.candles, w60, req.timeframe, req.asset_class)
         park_20 = compute_parkinson_vol(req.candles, w20, req.timeframe, req.asset_class)
 
-        # Use Parkinson as primary if available (more efficient estimator)
         rv_best_20 = park_20 if park_20 else rv_20
 
         # GMM-enhanced vol
@@ -191,164 +239,145 @@ async def volatility_analysis(req: VolatilityRequest):
             )
 
         # ── Step 3: Get market prices and compute greeks ──
-        # Use daily bars (previous close) as price — free tier compatible.
         # Walk backwards from today to find the last trading day
-        # (skip weekends; holidays may still return empty, but this
-        # handles the most common case).
-        enriched_chain: list[OptionContractWithGreeks] = []
-        lookup_date = today - timedelta(days=1)
-        for _ in range(7):  # look back up to 7 calendar days
-            if lookup_date.weekday() < 5:  # Mon-Fri
+        bar_date = today
+        for _ in range(7):
+            if bar_date.weekday() < 5:
                 break
-            lookup_date -= timedelta(days=1)
-        lookup_date_str = lookup_date.strftime("%Y-%m-%d")
+            bar_date -= timedelta(days=1)
+        bar_date_str = bar_date.strftime("%Y-%m-%d")
 
-        # Batched processing — round-robin across API keys
-        num_keys = len(req.api_keys)
-        BATCH_SIZE = 5 * num_keys  # 5 requests per key per batch
-        BATCH_DELAY = max(2, 13 // num_keys)  # scale delay inversely with keys
-        bars_cache: dict = {}
-        no_bar = 0
-        no_price = 0
-        no_iv = 0
-        errors = 0
-        total = len(contracts)
-        num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+        # Multi-key round-robin for option bar fetching
+        # Polygon free tier: 5 req/min/key. Each key gets exactly 5 requests per batch.
+        # With N keys: 5N contracts per batch, 61s delay = 5N contracts/min (at limit).
+        n_keys = len(req.api_keys)
+        batch_size = 5  # requests per key per batch (= Polygon free tier limit)
+        total_rate = batch_size * n_keys
 
-        print(f"[VOL] {req.ticker}: {total} contracts, {num_keys} API key(s), "
-              f"batch_size={BATCH_SIZE}, delay={BATCH_DELAY}s")
+        enriched_chain: list[OptionContractWithGreeks] = []
+        cached_bars: dict = {}
 
-        for batch_idx in range(num_batches):
-            batch_start = batch_idx * BATCH_SIZE
-            batch_end = min(batch_start + BATCH_SIZE, total)
-            batch = contracts[batch_start:batch_end]
+        for batch_start in range(0, len(contracts), total_rate):
+            batch = contracts[batch_start:batch_start + total_rate]
 
-            print(f"[VOL] {req.ticker}: batch {batch_idx + 1}/{num_batches} — "
-                  f"contracts {batch_start + 1}-{batch_end}/{total}")
+            if batch_start > 0:
+                print(f"  [Vol] Rate limit pause (61s) before batch {batch_start}–{batch_start+len(batch)} ({len(contracts)} total)...")
+                await asyncio.sleep(61)  # 60s + 1s buffer to respect 5 req/min/key
 
-            for ci, contract in enumerate(batch):
-                # Round-robin key assignment within each batch
-                key = req.api_keys[ci % num_keys]
-                try:
-                    bar = await fetch_option_daily_bar(key, contract.ticker, lookup_date_str)
-                    if bar:
-                        bars_cache[contract.ticker] = bar
-                    else:
-                        no_bar += 1
-                        continue
-                    market_price = bar["close"] if bar else None
+            # Assign contracts to keys round-robin
+            key_batches: dict = {i: [] for i in range(n_keys)}
+            for idx, contract in enumerate(batch):
+                key_idx = idx % n_keys
+                key_batches[key_idx].append(contract)
 
-                    bid, ask, oi, vol = None, None, None, None
-                    if bar:
-                        vol = bar.get("volume", 0)
+            # Fetch bars in parallel across keys
+            async def fetch_batch_for_key(key_idx, key_contracts):
+                results = []
+                for contract in key_contracts:
+                    try:
+                        bar = await fetch_option_daily_bar(
+                            api_key=req.api_keys[key_idx],
+                            option_ticker=contract.ticker,
+                            date=bar_date_str,
+                        )
+                        results.append((contract, bar))
+                    except Exception:
+                        results.append((contract, None))
+                return results
 
-                    if not (market_price and market_price > 0):
-                        no_price += 1
-                        continue
+            tasks = [
+                fetch_batch_for_key(key_idx, key_contracts)
+                for key_idx, key_contracts in key_batches.items()
+                if key_contracts
+            ]
+            batch_results = await asyncio.gather(*tasks)
 
-                    enriched = enrich_contract(
-                        contract=contract,
-                        spot=spot,
-                        market_price=market_price,
-                        bid=bid,
-                        ask=ask,
-                        open_interest=oi,
-                        volume=vol,
-                        r=req.risk_free_rate,
-                        q=req.dividend_yield,
-                        today=today,
-                    )
-                    if enriched.implied_volatility and enriched.implied_volatility > 0:
-                        enriched_chain.append(enriched)
-                    else:
-                        no_iv += 1
-                except Exception as exc:
-                    errors += 1
-                    continue
+            for key_results in batch_results:
+                for contract, bar in key_results:
+                    if bar and bar.get("close") and bar["close"] > 0:
+                        cached_bars[contract.ticker] = bar
+                        try:
+                            enriched = enrich_contract(
+                                contract=contract,
+                                spot=spot,
+                                market_price=bar["close"],
+                                bid=None, ask=None,
+                                open_interest=None,
+                                volume=bar.get("volume"),
+                                r=req.risk_free_rate,
+                                q=req.dividend_yield,
+                                today=today,
+                            )
+                            enriched_chain.append(enriched)
+                        except Exception:
+                            pass
 
-            # Wait between batches (skip after last batch)
-            if batch_idx < num_batches - 1:
-                await asyncio.sleep(BATCH_DELAY)
+        print(f"  [Vol] Enriched {len(enriched_chain)} / {len(contracts)} contracts")
 
-        print(f"[VOL] {req.ticker}: {total} contracts, "
-              f"{len(bars_cache)} had bars, "
-              f"{no_bar} no bar, {no_price} no price, {no_iv} no IV, {errors} errors → "
-              f"{len(enriched_chain)} enriched")
+        # ── Step 4-6: Build surface, compute metrics, generate signals ──
+        surface = build_iv_surface(enriched_chain)
 
-        # ── Step 4: Build IV surface and metrics ──
-        surface_points = build_iv_surface(enriched_chain)
-        print(f"[VOL] {req.ticker}: {len(surface_points)} surface points, "
-              f"{len(set(p.expiry_days for p in surface_points))} unique expiries, "
-              f"{len(set(p.moneyness for p in surface_points))} unique strikes")
-        atm_iv_near = compute_atm_iv(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
-        atm_iv_far = compute_atm_iv(enriched_chain, req.far_expiry_min_days, req.far_expiry_max_days)
-        skew_25d = compute_put_call_skew(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
+        atm_iv_near, atm_iv_far = compute_atm_iv(
+            enriched_chain, spot, req.near_expiry_max_days, req.far_expiry_min_days)
 
-        # Term structure
-        term_structure = None
+        term_structure = "flat"
         if atm_iv_near and atm_iv_far:
-            diff = atm_iv_near - atm_iv_far
+            diff = atm_iv_far - atm_iv_near
             if diff > 0.01:
-                term_structure = "backwardation"
-            elif diff < -0.01:
                 term_structure = "contango"
-            else:
-                term_structure = "flat"
+            elif diff < -0.01:
+                term_structure = "backwardation"
+
+        skew_25d = compute_put_call_skew(enriched_chain)
 
         # VRP
-        vrp_10 = (atm_iv_near - rv_10) if atm_iv_near and rv_10 else None
-        vrp_20 = (atm_iv_near - rv_best_20) if atm_iv_near and rv_best_20 else None
-        vrp_30 = (atm_iv_near - rv_30) if atm_iv_near and rv_30 else None
+        vrp_10 = (atm_iv_near - rv_10) if (atm_iv_near and rv_10) else None
+        vrp_20 = (atm_iv_near - (rv_best_20 or 0)) if atm_iv_near else None
+        vrp_30 = (atm_iv_near - rv_30) if (atm_iv_near and rv_30) else None
 
-        vol_anal = VolatilityAnalysis(
+        vol_analysis = VolatilityAnalysis(
             underlying_ticker=req.ticker,
             spot_price=spot,
-            analysis_date=today.strftime("%Y-%m-%d"),
-            realized_vol_10d=round(rv_10, 4) if rv_10 else None,
-            realized_vol_20d=round(rv_best_20, 4) if rv_best_20 else None,
-            realized_vol_30d=round(rv_30, 4) if rv_30 else None,
-            realized_vol_60d=round(rv_60, 4) if rv_60 else None,
-            gmm_weighted_vol=round(gmm_vol, 4) if gmm_vol else None,
-            gmm_weighted_kurtosis=round(gmm_kurt, 4) if gmm_kurt else None,
-            atm_iv_near=round(atm_iv_near, 4) if atm_iv_near else None,
-            atm_iv_far=round(atm_iv_far, 4) if atm_iv_far else None,
-            iv_term_structure=term_structure,
-            put_call_skew_25d=round(skew_25d, 4) if skew_25d else None,
-            vrp_10d=round(vrp_10, 4) if vrp_10 else None,
-            vrp_20d=round(vrp_20, 4) if vrp_20 else None,
-            vrp_30d=round(vrp_30, 4) if vrp_30 else None,
-            surface_points=surface_points,
+            analysis_date=today.isoformat(),
+            realized_vol_10d=rv_10,
+            realized_vol_20d=rv_20,
+            realized_vol_30d=rv_30,
+            realized_vol_60d=rv_60,
+            parkinson_vol_20d=park_20,
+            gmm_weighted_vol=gmm_vol if gmm_vol > 0 else None,
+            gmm_weighted_kurtosis=gmm_kurt if gmm_vol > 0 else None,
+            atm_iv_near=atm_iv_near,
+            atm_iv_far=atm_iv_far,
+            term_structure=term_structure,
+            put_call_skew_25d=skew_25d,
+            vrp_10d=vrp_10,
+            vrp_20d=vrp_20,
+            vrp_30d=vrp_30,
+            surface=surface,
             chain=enriched_chain,
         )
 
-        # ── Step 5: Generate trade signals ──
-        signals = generate_signals(vol_anal, enriched_chain, req.gmm_d2, spot, req.risk_free_rate)
-
-        # ── Step 6: Summary ──
-        summary = generate_vol_summary(vol_anal, signals)
+        signals = generate_signals(vol_analysis, req.gmm_d2, spot)
+        summary = generate_vol_summary(vol_analysis, signals)
 
         return VolatilityResponse(
-            volatility_analysis=vol_anal,
+            volatility_analysis=vol_analysis,
             trade_signals=signals,
             summary_text=summary,
             cached_contracts=contracts,
-            cached_bars=bars_cache,
+            cached_bars=cached_bars,
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Reprocess endpoint — uses cached data, no API calls ──
-
 @app.post("/volatility/reprocess", response_model=VolatilityResponse)
-async def volatility_reprocess(req: ReprocessRequest):
+async def reprocess_volatility(req: ReprocessRequest):
     """
-    Re-run greeks/IV/signals using cached contracts + bars.
+    Re-run greeks/IV/signals using cached data — no Polygon API calls.
     No Polygon API calls are made — instant reprocessing.
     """
     try:
@@ -392,65 +421,64 @@ async def volatility_reprocess(req: ReprocessRequest):
                         contract=contract,
                         spot=spot,
                         market_price=market_price,
-                        bid=None,
-                        ask=None,
+                        bid=None, ask=None,
                         open_interest=None,
                         volume=vol,
                         r=req.risk_free_rate,
                         q=req.dividend_yield,
                         today=today,
                     )
-                    if enriched.implied_volatility and enriched.implied_volatility > 0:
-                        enriched_chain.append(enriched)
+                    enriched_chain.append(enriched)
                 except Exception:
-                    continue
+                    pass
 
-        # ── Step 3: Build IV surface and metrics ──
-        surface_points = build_iv_surface(enriched_chain)
-        atm_iv_near = compute_atm_iv(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
-        atm_iv_far = compute_atm_iv(enriched_chain, req.far_expiry_min_days, req.far_expiry_max_days)
-        skew_25d = compute_put_call_skew(enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
+        # ── Steps 3-5: Surface, metrics, signals ──
+        surface = build_iv_surface(enriched_chain)
 
-        term_structure = None
+        atm_iv_near, atm_iv_far = compute_atm_iv(
+            enriched_chain, spot, req.near_expiry_max_days, req.far_expiry_min_days)
+
+        term_structure = "flat"
         if atm_iv_near and atm_iv_far:
-            diff = atm_iv_near - atm_iv_far
+            diff = atm_iv_far - atm_iv_near
             if diff > 0.01:
-                term_structure = "backwardation"
-            elif diff < -0.01:
                 term_structure = "contango"
-            else:
-                term_structure = "flat"
+            elif diff < -0.01:
+                term_structure = "backwardation"
 
-        vrp_10 = (atm_iv_near - rv_10) if atm_iv_near and rv_10 else None
-        vrp_20 = (atm_iv_near - rv_best_20) if atm_iv_near and rv_best_20 else None
-        vrp_30 = (atm_iv_near - rv_30) if atm_iv_near and rv_30 else None
+        skew_25d = compute_put_call_skew(enriched_chain)
 
-        vol_anal = VolatilityAnalysis(
+        vrp_10 = (atm_iv_near - rv_10) if (atm_iv_near and rv_10) else None
+        vrp_20 = (atm_iv_near - (rv_best_20 or 0)) if atm_iv_near else None
+        vrp_30 = (atm_iv_near - rv_30) if (atm_iv_near and rv_30) else None
+
+        vol_analysis = VolatilityAnalysis(
             underlying_ticker=req.ticker,
             spot_price=spot,
-            analysis_date=today.strftime("%Y-%m-%d"),
-            realized_vol_10d=round(rv_10, 4) if rv_10 else None,
-            realized_vol_20d=round(rv_best_20, 4) if rv_best_20 else None,
-            realized_vol_30d=round(rv_30, 4) if rv_30 else None,
-            realized_vol_60d=round(rv_60, 4) if rv_60 else None,
-            gmm_weighted_vol=round(gmm_vol, 4) if gmm_vol else None,
-            gmm_weighted_kurtosis=round(gmm_kurt, 4) if gmm_kurt else None,
-            atm_iv_near=round(atm_iv_near, 4) if atm_iv_near else None,
-            atm_iv_far=round(atm_iv_far, 4) if atm_iv_far else None,
-            iv_term_structure=term_structure,
-            put_call_skew_25d=round(skew_25d, 4) if skew_25d else None,
-            vrp_10d=round(vrp_10, 4) if vrp_10 else None,
-            vrp_20d=round(vrp_20, 4) if vrp_20 else None,
-            vrp_30d=round(vrp_30, 4) if vrp_30 else None,
-            surface_points=surface_points,
+            analysis_date=today.isoformat(),
+            realized_vol_10d=rv_10,
+            realized_vol_20d=rv_20,
+            realized_vol_30d=rv_30,
+            realized_vol_60d=rv_60,
+            parkinson_vol_20d=park_20,
+            gmm_weighted_vol=gmm_vol if gmm_vol > 0 else None,
+            gmm_weighted_kurtosis=gmm_kurt if gmm_vol > 0 else None,
+            atm_iv_near=atm_iv_near,
+            atm_iv_far=atm_iv_far,
+            term_structure=term_structure,
+            put_call_skew_25d=skew_25d,
+            vrp_10d=vrp_10,
+            vrp_20d=vrp_20,
+            vrp_30d=vrp_30,
+            surface=surface,
             chain=enriched_chain,
         )
 
-        signals = generate_signals(vol_anal, enriched_chain, req.gmm_d2, spot, req.risk_free_rate)
-        summary = generate_vol_summary(vol_anal, signals)
+        signals = generate_signals(vol_analysis, req.gmm_d2, spot)
+        summary = generate_vol_summary(vol_analysis, signals)
 
         return VolatilityResponse(
-            volatility_analysis=vol_anal,
+            volatility_analysis=vol_analysis,
             trade_signals=signals,
             summary_text=summary,
             cached_contracts=req.cached_contracts,
@@ -460,6 +488,4 @@ async def volatility_reprocess(req: ReprocessRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
