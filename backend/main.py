@@ -14,14 +14,14 @@ from options_client import (
     fetch_options_contracts, fetch_option_daily_bar,
     fetch_previous_close, fetch_option_last_trade, fetch_option_last_quote,
 )
-from analysis import build_distributions, fit_gmm, generate_results_text
+from analysis import build_distributions, fit_gmm, fit_synced_gmm, generate_results_text, compute_moment_evolution
 from volatility_engine import (
     compute_realized_vol, compute_parkinson_vol, compute_gmm_weighted_vol,
     enrich_contract, build_iv_surface, compute_atm_iv, compute_put_call_skew,
     generate_signals, generate_vol_summary, _candles_per_day,
 )
 
-app = FastAPI(title="Price Distribution & Volatility Analysis API", version="2.0.0")
+app = FastAPI(title="Price Distribution & Volatility Analysis API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,7 +52,7 @@ async def fetch(req: FetchRequest):
             asset_class = detect_asset_class(req.ticker)
 
         candles = await fetch_candles(
-            api_key=req.api_key,
+            api_key=req.api_keys[0],
             ticker=req.ticker,
             asset_class=asset_class,
             timeframe=req.timeframe,
@@ -85,10 +85,14 @@ async def analyze(req: AnalyzeRequest):
             candles=req.candles, num_bins=req.num_bins,
         )
 
-        gmm_d1 = fit_gmm(bin_centers=np.array(bin_centers), density=d1_raw,
-                          n_components_override=req.n_components_override)
-        gmm_d2 = fit_gmm(bin_centers=np.array(bin_centers), density=d2_raw,
-                          n_components_override=req.n_components_override)
+        if req.sync_gmm and req.n_components_override is None:
+            gmm_d1, gmm_d2, synced_n = fit_synced_gmm(
+                bin_centers=np.array(bin_centers), d1_density=d1_raw, d2_density=d2_raw)
+        else:
+            gmm_d1 = fit_gmm(bin_centers=np.array(bin_centers), density=d1_raw,
+                              n_components_override=req.n_components_override)
+            gmm_d2 = fit_gmm(bin_centers=np.array(bin_centers), density=d2_raw,
+                              n_components_override=req.n_components_override)
 
         results_text = generate_results_text(
             ticker=req.ticker, asset_class=req.asset_class, timeframe=req.timeframe,
@@ -97,11 +101,22 @@ async def analyze(req: AnalyzeRequest):
             gmm_d1=gmm_d1, gmm_d2=gmm_d2,
         )
 
+        # Compute moment evolution (sliding window)
+        moment_evo = compute_moment_evolution(
+            candles=req.candles,
+            window_size=max(30, len(req.candles) // 5),
+            step_size=max(5, len(req.candles) // 30),
+            num_bins=req.num_bins,
+            n_components=gmm_d1.n_components,
+            sync_gmm=req.sync_gmm,
+        )
+
         return AnalyzeResponse(
             ticker=req.ticker, asset_class=req.asset_class, timeframe=req.timeframe,
             start_date=req.start_date, end_date=req.end_date,
             total_candles=len(req.candles), num_bins=req.num_bins,
             d1=d1, d2=d2, gmm_d1=gmm_d1, gmm_d2=gmm_d2, results_text=results_text,
+            moment_evolution=moment_evo,
         )
     except HTTPException:
         raise
@@ -159,7 +174,7 @@ async def volatility_analysis(req: VolatilityRequest):
         exp_lte = (today + timedelta(days=req.far_expiry_max_days)).strftime("%Y-%m-%d")
 
         contracts = await fetch_options_contracts(
-            api_key=req.api_key,
+            api_key=req.api_keys[0],
             underlying_ticker=req.ticker,
             expiration_date_gte=exp_gte,
             expiration_date_lte=exp_lte,
@@ -188,9 +203,10 @@ async def volatility_analysis(req: VolatilityRequest):
             lookup_date -= timedelta(days=1)
         lookup_date_str = lookup_date.strftime("%Y-%m-%d")
 
-        # Batched processing — respect Polygon free tier (5 req/min)
-        BATCH_SIZE = 5
-        BATCH_DELAY = 13  # seconds between batches (60s / 5 = 12s + 1s buffer)
+        # Batched processing — round-robin across API keys
+        num_keys = len(req.api_keys)
+        BATCH_SIZE = 5 * num_keys  # 5 requests per key per batch
+        BATCH_DELAY = max(2, 13 // num_keys)  # scale delay inversely with keys
         bars_cache: dict = {}
         no_bar = 0
         no_price = 0
@@ -198,6 +214,9 @@ async def volatility_analysis(req: VolatilityRequest):
         errors = 0
         total = len(contracts)
         num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+        print(f"[VOL] {req.ticker}: {total} contracts, {num_keys} API key(s), "
+              f"batch_size={BATCH_SIZE}, delay={BATCH_DELAY}s")
 
         for batch_idx in range(num_batches):
             batch_start = batch_idx * BATCH_SIZE
@@ -207,9 +226,11 @@ async def volatility_analysis(req: VolatilityRequest):
             print(f"[VOL] {req.ticker}: batch {batch_idx + 1}/{num_batches} — "
                   f"contracts {batch_start + 1}-{batch_end}/{total}")
 
-            for contract in batch:
+            for ci, contract in enumerate(batch):
+                # Round-robin key assignment within each batch
+                key = req.api_keys[ci % num_keys]
                 try:
-                    bar = await fetch_option_daily_bar(req.api_key, contract.ticker, lookup_date_str)
+                    bar = await fetch_option_daily_bar(key, contract.ticker, lookup_date_str)
                     if bar:
                         bars_cache[contract.ticker] = bar
                     else:

@@ -3,10 +3,11 @@ import { useState, useRef } from 'react'
 const TIMEFRAMES = ['1min', '5min', '15min', '30min', '1hour', '4hour', '1day', '1week']
 const ASSET_CLASSES = ['auto', 'stocks', 'crypto', 'forex']
 const HINTS = { auto: 'AAPL, X:BTCUSD, C:EURUSD', stocks: 'AAPL, SPY, TSLA', crypto: 'BTCUSD, X:ETHUSD', forex: 'EURUSD, C:GBPJPY' }
+const MONO = "'JetBrains Mono', monospace"
 
-export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReprocess, onDownloadCache, onUploadCache, hasVolCache, loading, status }) {
+export default function Controls({ onFetchAndAnalyze, onReAnalyze, onRunVolatility, onReprocess, onDownloadCache, onUploadCache, hasCandles, hasVolCache, loading, status }) {
   const fileInputRef = useRef(null)
-  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem('polygon_api_key') || '')
+  const [apiKeyInput, setApiKeyInput] = useState(() => sessionStorage.getItem('polygon_api_keys') || '')
   const [ticker, setTicker] = useState('SPY')
   const [assetClass, setAssetClass] = useState('auto')
   const [timeframe, setTimeframe] = useState('1day')
@@ -14,31 +15,44 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10))
   const [numBins, setNumBins] = useState(200)
   const [nComponents, setNComponents] = useState(0)
+  const [syncGmm, setSyncGmm] = useState(false)
   // Volatility params
   const [riskFreeRate, setRiskFreeRate] = useState(0.05)
   const [divYield, setDivYield] = useState(0.0)
   const [strikeRange, setStrikeRange] = useState(15)
   const [collapsed, setCollapsed] = useState({})
 
-  const handleApiKey = (v) => { setApiKey(v); sessionStorage.setItem('polygon_api_key', v) }
+  const handleApiKeyInput = (v) => { setApiKeyInput(v); sessionStorage.setItem('polygon_api_keys', v) }
+  const parseKeys = () => apiKeyInput.split(/[,;\n]+/).map(k => k.trim()).filter(Boolean)
 
   const toggle = (key) => setCollapsed(p => ({ ...p, [key]: !p[key] }))
 
   const handleSubmit = () => {
-    if (!apiKey.trim()) return alert('Enter your Polygon.io API key.')
+    const keys = parseKeys()
+    if (keys.length === 0) return alert('Enter at least one Polygon.io API key.')
     if (!ticker.trim()) return alert('Enter a ticker symbol.')
     onFetchAndAnalyze({
-      api_key: apiKey.trim(), ticker: ticker.trim().toUpperCase(), asset_class: assetClass,
+      api_keys: keys, ticker: ticker.trim().toUpperCase(), asset_class: assetClass,
       timeframe, start_date: startDate, end_date: endDate,
       num_bins: numBins, n_components_override: nComponents === 0 ? null : nComponents,
+      sync_gmm: syncGmm,
+    })
+  }
+
+  const handleReAnalyze = () => {
+    onReAnalyze({
+      num_bins: numBins,
+      n_components_override: nComponents === 0 ? null : nComponents,
+      sync_gmm: syncGmm,
     })
   }
 
   const handleVolatility = () => {
-    if (!apiKey.trim()) return alert('Enter your Polygon.io API key.')
+    const keys = parseKeys()
+    if (keys.length === 0) return alert('Enter at least one Polygon.io API key.')
     if (!ticker.trim()) return alert('Enter a ticker symbol.')
     onRunVolatility({
-      api_key: apiKey.trim(), ticker: ticker.trim().toUpperCase(),
+      api_keys: keys, ticker: ticker.trim().toUpperCase(),
       risk_free_rate: riskFreeRate, dividend_yield: divYield,
       strike_range_pct: strikeRange / 100,
     })
@@ -50,14 +64,21 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
       <div style={S.brand}>
         <span style={S.brandIcon}>◈</span>
         <span style={S.brandName}>VolEdge</span>
-        <span style={S.version}>v2.0</span>
+        <span style={S.version}>v3.0</span>
       </div>
 
       <div style={S.scrollArea}>
         {/* API Key */}
         <Section title="CONNECTION" id="conn" collapsed={collapsed} toggle={toggle}>
-          <input type="password" value={apiKey} onChange={e => handleApiKey(e.target.value)}
-            placeholder="Polygon.io API key" style={S.input} />
+          <textarea value={apiKeyInput} onChange={e => handleApiKeyInput(e.target.value)}
+            placeholder="Polygon.io API key(s) — one per line or comma-separated"
+            rows={2}
+            style={{ ...S.input, resize: 'vertical', minHeight: 32 }} />
+          {parseKeys().length > 1 && (
+            <div style={{ fontSize: 10, color: '#22c55e', fontFamily: "'JetBrains Mono', monospace", marginTop: 3 }}>
+              {parseKeys().length} keys detected — {parseKeys().length * 5} req/min
+            </div>
+          )}
           <a href="https://polygon.io/dashboard/signup" target="_blank" rel="noreferrer" style={S.link}>
             Get free key →
           </a>
@@ -118,6 +139,15 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
                 onChange={e => setNComponents(Number(e.target.value))} style={S.slider} />
             </div>
           </Row>
+          <div
+            onClick={() => setSyncGmm(p => !p)}
+            style={{ ...S.toggleRow, cursor: 'pointer', userSelect: 'none', marginTop: 6 }}
+          >
+            <span style={{ ...S.toggleDot, background: syncGmm ? '#22c55e' : '#1e2230' }} />
+            <span style={{ fontSize: 10, fontFamily: MONO, color: syncGmm ? '#22c55e' : '#6b7280' }}>
+              Sync D1/D2 (shared N)
+            </span>
+          </div>
         </Section>
 
         {/* Volatility Params */}
@@ -145,6 +175,12 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
             style={{ ...S.btn, ...S.btnPrimary, ...(loading ? S.btnDisabled : {}) }}>
             {loading ? '⏳ Processing…' : '▶ Fetch & Analyze'}
           </button>
+          {hasCandles && (
+            <button onClick={handleReAnalyze} disabled={loading}
+              style={{ ...S.btn, ...S.btnReanalyze, ...(loading ? S.btnDisabled : {}), marginTop: 6 }}>
+              {loading ? '⏳ Processing…' : '⟳ Re-Analyze (GMM)'}
+            </button>
+          )}
           <button onClick={handleVolatility} disabled={loading}
             style={{ ...S.btn, ...S.btnVol, ...(loading ? S.btnDisabled : {}), marginTop: 6 }}>
             {loading ? '⏳ Processing…' : '◈ Run Vol Analysis'}
@@ -167,9 +203,9 @@ export default function Controls({ onFetchAndAnalyze, onRunVolatility, onReproce
           <div style={S.cacheRow}>
             <button
               onClick={onDownloadCache}
-              disabled={!hasVolCache}
-              style={{ ...S.cacheBtn, ...(hasVolCache ? {} : S.cacheBtnDisabled) }}
-              title="Download cached data as JSON"
+              disabled={!hasCandles}
+              style={{ ...S.cacheBtn, ...(hasCandles ? {} : S.cacheBtnDisabled) }}
+              title="Download cached raw data as JSON"
             >↓ Save</button>
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -257,6 +293,11 @@ const S = {
     fontFamily: "'JetBrains Mono', monospace", cursor: 'pointer',
   },
   slider: { width: '100%', accentColor: '#3b82f6', cursor: 'pointer', height: 4 },
+  toggleRow: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0' },
+  toggleDot: {
+    width: 10, height: 10, borderRadius: '50%', border: '1px solid #3b82f6',
+    transition: 'background 0.15s',
+  },
   tfGrid: {
     display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 3, marginTop: 4,
   },
@@ -280,6 +321,10 @@ const S = {
   btnReprocess: {
     background: 'linear-gradient(135deg, #059669 0%, #10b981 100%)', color: '#fff',
     border: '1px solid #34d399',
+  },
+  btnReanalyze: {
+    background: 'linear-gradient(135deg, #d97706 0%, #f59e0b 100%)', color: '#fff',
+    border: '1px solid #fbbf24',
   },
   cacheRow: {
     display: 'flex', gap: 4, marginTop: 8, paddingTop: 8,

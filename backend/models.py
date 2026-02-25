@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 # ─────────────────────────────────────────────
 
 class FetchRequest(BaseModel):
-    api_key: str
+    api_keys: List[str]  # one or more Polygon.io API keys
     ticker: str
     asset_class: str
     timeframe: str
@@ -44,6 +44,7 @@ class AnalyzeRequest(BaseModel):
     candles: List[Candle]
     num_bins: int = Field(default=200, ge=50, le=500)
     n_components_override: Optional[int] = Field(default=None, ge=1, le=10)
+    sync_gmm: bool = False  # If True, find best N across both D1 and D2
 
 
 class GMMComponent(BaseModel):
@@ -88,6 +89,7 @@ class AnalyzeResponse(BaseModel):
     gmm_d1: GMMResult
     gmm_d2: GMMResult
     results_text: str
+    moment_evolution: Optional[Dict[str, Any]] = None  # sliding window moment data
 
 
 # ─────────────────────────────────────────────
@@ -207,7 +209,7 @@ class VolatilityResponse(BaseModel):
 
 
 class VolatilityRequest(BaseModel):
-    api_key: str
+    api_keys: List[str]  # one or more Polygon.io API keys
     ticker: str
     candles: List[Candle]              # underlying candles already fetched
     spot_price: float

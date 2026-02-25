@@ -37,6 +37,32 @@ price-distribution-tool/
 └── README.md
 ```
 
+## What's New in v3.0
+
+### Consistency & Cache Overhaul
+- **Re-Analyze button** — Change GMM N or bins and click "⟳ Re-Analyze (GMM)" to refit without re-fetching candles from Polygon
+- **Raw-only caching** — Downloaded cache files (v3) contain only candles + contracts + bars — no computed analysis. Prevents stale/conflicting results when merging files
+- **Auto-recompute on upload** — Loading a cache file triggers fresh GMM analysis + vol reprocessing automatically
+
+### Multi-API Key Parallel Fetching
+- **Multiple API keys** — Paste multiple Polygon keys (one per line or comma-separated) in the CONNECTION section
+- **Round-robin batching** — Keys are distributed across option bar batches: N keys → N×5 req/min throughput
+- **Key counter** — UI shows how many keys detected and effective request rate
+
+### Cache File Merger
+- **MERGE tab** — Upload multiple cache files, auto-detect overlapping candles by timestamp
+- **Dedup stats** — Shows input vs merged counts for candles, contracts, bars
+- **Download merged** — Export combined file for upload into any VolEdge session
+
+### Synced GMMs
+- **Sync D1/D2 toggle** — Finds optimal N minimizing combined BIC across both distributions
+- **Shared N** — When enabled, D1 and D2 use the same number of Gaussian components
+
+### GMM Moment Evolution
+- **Sliding window analysis** — Tracks how each Gaussian component's mean, σ, and weight evolve as the data window moves forward
+- **Mixture kurtosis** — Computes excess kurtosis of the full mixture distribution at each window step
+- **MOMENTS tab** — 2×2 grid of charts for D1 and D2: component means, σ, weights, and mixture kurtosis over time
+
 ## What's New in v2.1
 
 ### Bug Fixes & Correctness Improvements

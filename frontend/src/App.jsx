@@ -7,6 +7,8 @@ import ComparisonChart from './components/ComparisonChart'
 import ResultsPanel from './components/ResultsPanel'
 import VolatilityPanel from './components/VolatilityPanel'
 import SignalsPanel from './components/SignalsPanel'
+import MergePanel from './components/MergePanel'
+import MomentsChart from './components/MomentsChart'
 import { fetchCandles, analyzeData, runVolatilityAnalysis, reprocessVolatility } from './api'
 
 const H = 340
@@ -34,7 +36,7 @@ export default function App() {
     try {
       setInfo('Fetching candles from Polygon.io…')
       const fetchResult = await fetchCandles({
-        api_key: params.api_key, ticker: params.ticker, asset_class: params.asset_class,
+        api_key: params.api_keys[0], ticker: params.ticker, asset_class: params.asset_class,
         timeframe: params.timeframe, start_date: params.start_date, end_date: params.end_date,
       })
       setCandles(fetchResult.candles)
@@ -46,9 +48,33 @@ export default function App() {
         timeframe: fetchResult.timeframe, start_date: fetchResult.start_date,
         end_date: fetchResult.end_date, candles: fetchResult.candles,
         num_bins: params.num_bins, n_components_override: params.n_components_override,
+        sync_gmm: params.sync_gmm || false,
       })
       setAnalysis(analysisResult)
       setOk(`GMM complete — D1: ${analysisResult.gmm_d1.n_components}, D2: ${analysisResult.gmm_d2.n_components} components`)
+    } catch (err) { setErr(err.message) }
+    finally { setLoading(false) }
+  }
+
+  const handleReAnalyze = async (params) => {
+    if (!candles || !lastParams?.fetchResult) {
+      return setErr('No candles loaded. Run Fetch & Analyze first.')
+    }
+    setLoading(true)
+    setAnalysis(null); setVolData(null)
+    try {
+      const fr = lastParams.fetchResult
+      setInfo(`Re-analyzing ${candles.length} candles with GMM N=${params.n_components_override || 'Auto'}…`)
+      const analysisResult = await analyzeData({
+        ticker: fr.ticker, asset_class: fr.asset_class,
+        timeframe: fr.timeframe, start_date: fr.start_date,
+        end_date: fr.end_date, candles: candles,
+        num_bins: params.num_bins, n_components_override: params.n_components_override,
+        sync_gmm: params.sync_gmm || false,
+      })
+      setAnalysis(analysisResult)
+      setLastParams(prev => ({ ...prev, num_bins: params.num_bins, n_components_override: params.n_components_override }))
+      setOk(`Re-analysis complete — D1: ${analysisResult.gmm_d1.n_components}, D2: ${analysisResult.gmm_d2.n_components} components`)
     } catch (err) { setErr(err.message) }
     finally { setLoading(false) }
   }
@@ -63,7 +89,7 @@ export default function App() {
       setInfo('Fetching options chain & computing Black-Scholes greeks…')
       const spot = candles[candles.length - 1].close
       const result = await runVolatilityAnalysis({
-        api_key: volParams.api_key,
+        api_keys: volParams.api_keys,
         ticker: volParams.ticker,
         candles: candles,
         spot_price: spot,
@@ -120,20 +146,19 @@ export default function App() {
   }
 
   const handleDownloadCache = () => {
-    if (!cachedContracts || !cachedBars || !candles) {
-      return setErr('No cached data to download. Run Vol Analysis first.')
+    if (!candles) {
+      return setErr('No data to download. Run Fetch & Analyze first.')
     }
     const payload = {
-      _version: 2,
-      ticker: analysis?.ticker || 'UNKNOWN',
+      _version: 3,
+      ticker: lastParams?.fetchResult?.ticker || analysis?.ticker || 'UNKNOWN',
       timeframe: lastParams?.fetchResult?.timeframe || '1day',
       asset_class: lastParams?.fetchResult?.asset_class || 'stocks',
-      spot_price: candles[candles.length - 1].close,
+      start_date: lastParams?.fetchResult?.start_date || '',
+      end_date: lastParams?.fetchResult?.end_date || '',
       candles,
-      analysis,          // full GMM analysis (results_text, gmm_d1, gmm_d2, etc.)
-      vol_data: volData,  // full vol response (volatility_analysis, trade_signals, summary)
-      cached_contracts: cachedContracts,
-      cached_bars: cachedBars,
+      cached_contracts: cachedContracts || [],
+      cached_bars: cachedBars || {},
       saved_at: new Date().toISOString(),
     }
     const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' })
@@ -143,40 +168,75 @@ export default function App() {
     a.download = `voledge_${payload.ticker}_${payload.saved_at.slice(0, 10)}.json`
     a.click()
     URL.revokeObjectURL(url)
-    setOk(`Cache exported (${(blob.size / 1024).toFixed(0)} KB)`)
+    setOk(`Cache exported — raw data only (${(blob.size / 1024).toFixed(0)} KB)`)
   }
 
-  const handleUploadCache = (file) => {
+  const handleUploadCache = async (file) => {
     if (!file) return
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const data = JSON.parse(e.target.result)
-        if (!data.cached_contracts || !data.cached_bars || !data.candles) {
-          return setErr('Invalid cache file — missing required fields.')
+        if (!data.candles) {
+          return setErr('Invalid cache file — missing candles.')
         }
+        // Restore raw data
         setCandles(data.candles)
-        setCachedContracts(data.cached_contracts)
-        setCachedBars(data.cached_bars)
-        // Restore full analysis if present (v2+), otherwise build minimal
-        if (data.analysis) {
-          setAnalysis(data.analysis)
-        } else {
-          setAnalysis({ ticker: data.ticker, gmm_d2: data.gmm_d2 || null })
-        }
-        // Restore full vol data if present (v2+)
-        if (data.vol_data) {
-          setVolData(data.vol_data)
-        }
+        setCachedContracts(data.cached_contracts || null)
+        setCachedBars(data.cached_bars || null)
         setLastParams(prev => ({
           ...prev,
           fetchResult: {
-            ...prev?.fetchResult,
-            timeframe: data.timeframe || '1day',
+            ticker: data.ticker || 'UNKNOWN',
             asset_class: data.asset_class || 'stocks',
+            timeframe: data.timeframe || '1day',
+            start_date: data.start_date || '',
+            end_date: data.end_date || '',
           },
         }))
-        setOk(`Cache loaded: ${data.ticker} (${data.cached_contracts.length} contracts, saved ${data.saved_at?.slice(0, 10) || 'unknown'})`)
+
+        // Auto re-analyze from raw candles
+        setLoading(true)
+        setInfo(`Cache loaded: ${data.ticker}. Re-computing GMM analysis…`)
+        try {
+          const analysisResult = await analyzeData({
+            ticker: data.ticker || 'UNKNOWN',
+            asset_class: data.asset_class || 'stocks',
+            timeframe: data.timeframe || '1day',
+            start_date: data.start_date || '',
+            end_date: data.end_date || '',
+            candles: data.candles,
+            num_bins: 200,
+          })
+          setAnalysis(analysisResult)
+
+          // Auto reprocess vol if contracts+bars exist
+          if (data.cached_contracts?.length > 0 && data.cached_bars && Object.keys(data.cached_bars).length > 0) {
+            setInfo('Re-computing volatility analysis from cached data…')
+            const spot = data.candles[data.candles.length - 1].close
+            const volResult = await reprocessVolatility({
+              ticker: data.ticker || 'UNKNOWN',
+              candles: data.candles,
+              spot_price: spot,
+              timeframe: data.timeframe || '1day',
+              asset_class: data.asset_class || 'stocks',
+              gmm_d2: analysisResult.gmm_d2,
+              risk_free_rate: 0.05,
+              dividend_yield: 0.0,
+              strike_range_pct: 0.15,
+              cached_contracts: data.cached_contracts,
+              cached_bars: data.cached_bars,
+            })
+            setVolData(volResult)
+            setOk(`Cache restored: ${data.ticker} — GMM + Vol recomputed (${data.cached_contracts.length} contracts)`)
+          } else {
+            setOk(`Cache restored: ${data.ticker} — GMM recomputed (${data.candles.length} candles)`)
+          }
+        } catch (err) {
+          setErr(`Cache loaded but analysis failed: ${err.message}`)
+        } finally {
+          setLoading(false)
+        }
       } catch { setErr('Failed to parse cache file.') }
     }
     reader.readAsText(file)
@@ -188,16 +248,20 @@ export default function App() {
     { id: 'volatility', label: 'VOL', icon: '◈', accent: true },
     { id: 'signals', label: 'SIGNALS', icon: '⚡', accent: true },
     { id: 'results', label: 'DATA', icon: '≡' },
+    { id: 'moments', label: 'MOMENTS', icon: '📈' },
+    { id: 'merge', label: 'MERGE', icon: '⊕' },
   ]
 
   return (
     <div style={S.root}>
       <Controls
         onFetchAndAnalyze={handleFetchAndAnalyze}
+        onReAnalyze={handleReAnalyze}
         onRunVolatility={handleRunVolatility}
         onReprocess={handleReprocess}
         onDownloadCache={handleDownloadCache}
         onUploadCache={handleUploadCache}
+        hasCandles={!!candles}
         hasVolCache={!!(cachedContracts && cachedBars)}
         loading={loading}
         status={status}
@@ -303,7 +367,24 @@ export default function App() {
               {activeTab === 'results' && (
                 <ResultsPanel resultsText={analysis.results_text} analysisData={analysis} />
               )}
+
+              {activeTab === 'moments' && analysis.moment_evolution && (
+                <div>
+                  <div style={{ padding: '8px 12px', borderBottom: '1px solid #1a1d25', fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: '#9ca3af' }}>
+                    D1: Time-at-Price
+                  </div>
+                  <MomentsChart momentEvolution={analysis.moment_evolution} distLabel="d1" />
+                  <div style={{ padding: '8px 12px', borderBottom: '1px solid #1a1d25', borderTop: '1px solid #1a1d25', fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: '#9ca3af' }}>
+                    D2: Volume-Weighted
+                  </div>
+                  <MomentsChart momentEvolution={analysis.moment_evolution} distLabel="d2" />
+                </div>
+              )}
             </>
+          )}
+
+          {activeTab === 'merge' && (
+            <MergePanel />
           )}
         </div>
       </div>
