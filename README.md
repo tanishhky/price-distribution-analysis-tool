@@ -46,6 +46,19 @@ price-distribution-tool/
 
 ## Core Workflows & Features
 
+### Demonstrations
+
+Check out the interactive backtesting and analysis features:
+
+- **API Mode Walk-Forward Execution:** Execute complex multi-regime strategies with zero look-ahead bias right out of the box.
+![Strategy API Execution Demo](assets/demos/strategy_demo.webp)
+
+- **Parameter Sensitivity Sweep:** Instantly visualize how tiny configuration changes impact your CAGR and Sharpe using 3D surface plots.
+![Sensitivity Panel Demo](assets/demos/sensitivity_demo.webp)
+
+- **Walk-Forward Optimization (WFO):** Dynamically optimize and map metrics over moving training windows.
+![WFO Panel & Tearsheet Demo](assets/demos/tearsheet_wfo_demo.webp)
+
 ### 1. Data Fetching & Parallel Processing
 - **Multi-API Key Support** — Paste multiple Polygon keys (one per line or comma-separated) to bypass free tier constraints.
 - **Parallel Chunking** — The backend automatically splits historical date ranges across all available keys for concurrent fetching.

@@ -13,6 +13,11 @@ import SettingsModal, { useSettings } from './components/SettingsModal'
 import { fetchCandles, analyzeData, runVolatilityAnalysis, reprocessVolatility } from './api'
 import StrategyPanel from './components/StrategyPanel'
 import EquityAnimator from './components/EquityAnimator'
+import TearsheetPanel from './components/TearsheetPanel'
+import ComparePanel from './components/ComparePanel'
+import SensitivityPanel from './components/SensitivityPanel'
+import WfoPanel from './components/WfoPanel'
+import LibraryPanel from './components/LibraryPanel'
 
 const H = 340
 
@@ -26,6 +31,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, updateSettings, resetSettings] = useSettings()
   const [strategyResult, setStrategyResult] = useState(null)
+  const [strategyHistory, setStrategyHistory] = useState([])
+  const [loadedStrategy, setLoadedStrategy] = useState(null)
   // Sidebar state
   const [sidebarWidth, setSidebarWidth] = useState(260)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -284,6 +291,11 @@ export default function App() {
     { id: 'results', label: 'DATA', icon: '≡' },
     { id: 'moments', label: 'MOMENTS', icon: '📈' },
     { id: 'strategy', label: 'STRATEGY', icon: '⚗', accent: true },
+    { id: 'library', label: 'LIBRARY', icon: '📚' },
+    { id: 'tearsheet', label: 'TEARSHEET', icon: '📊', accent: true },
+    { id: 'compare', label: 'COMPARE', icon: '⚖' },
+    { id: 'sensitivity', label: 'SENSITIVITY', icon: '🎛', accent: true },
+    { id: 'wfo', label: 'WFO', icon: '🚶‍♂️', accent: true },
     { id: 'animate', label: 'ANIMATE', icon: '▶', accent: true },
     { id: 'merge', label: 'MERGE', icon: '⊕' },
   ]
@@ -373,7 +385,7 @@ export default function App() {
 
         {/* Content */}
         <div style={S.content}>
-          {!analysis && !loading && !['strategy', 'animate', 'merge'].includes(activeTab) && (
+          {!analysis && !loading && !['strategy', 'animate', 'merge', 'tearsheet', 'compare', 'library', 'sensitivity', 'wfo'].includes(activeTab) && (
             <div style={S.placeholder}>
               <div style={S.placeholderIcon}>◈</div>
               <div style={S.placeholderTitle}>VolEdge Trading System</div>
@@ -469,10 +481,39 @@ export default function App() {
             </>
           )}
           {activeTab === 'strategy' && (
-            <StrategyPanel onResult={(data) => {
-              setStrategyResult(data)
-              setActiveTab('animate')
-            }} />
+            <StrategyPanel 
+              loadedStrategy={loadedStrategy}
+              onResult={(data) => {
+                setStrategyResult(data)
+                setStrategyHistory(prev => [...prev, data])
+                setActiveTab('tearsheet')
+              }} 
+            />
+          )}
+
+          {activeTab === 'library' && (
+            <div style={S.panel}>
+              <LibraryPanel onSelectStrategy={(s) => {
+                setLoadedStrategy(s)
+                setActiveTab('strategy')
+              }} />
+            </div>
+          )}
+
+          {activeTab === 'tearsheet' && (
+            <TearsheetPanel strategyResult={strategyResult} />
+          )}
+
+          {activeTab === 'compare' && (
+            <ComparePanel strategyHistory={strategyHistory} />
+          )}
+
+          {activeTab === 'sensitivity' && (
+            <SensitivityPanel strategyResult={strategyResult} sessionId={strategyResult?.session_id} code={strategyResult?.code} />
+          )}
+
+          {activeTab === 'wfo' && (
+            <WfoPanel strategyResult={strategyResult} sessionId={strategyResult?.session_id} code={strategyResult?.code} />
           )}
 
           {activeTab === 'animate' && (

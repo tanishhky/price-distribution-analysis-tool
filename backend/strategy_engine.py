@@ -26,12 +26,21 @@ import math
 #  STRATEGY DEFINITION SCHEMA
 # ═══════════════════════════════════════════════
 
+class TransactionCostModel(BaseModel):
+    spread_bps: float = Field(2.0, ge=0)
+    commission_per_share: float = Field(0.005, ge=0)
+    min_commission: float = Field(1.0, ge=0)
+    market_impact_bps: float = Field(1.0, ge=0)
+    slippage_pct: float = Field(0.001, ge=0)
+    flat_fee: float = Field(0.0, ge=0)
+
 class StrategyConfig(BaseModel):
     rebalance_days: int = Field(63, ge=1, le=504, description="Days between rebalances")
     min_training_days: int = Field(252, ge=60, le=1260, description="Minimum history before first trade")
     window_type: str = Field("expanding", pattern="^(expanding|rolling)$")
     rolling_window: Optional[int] = Field(None, ge=126, le=2520, description="Rolling window size (only if window_type='rolling')")
-    transaction_cost: float = Field(0.001, ge=0, le=0.05, description="Cost per $ turnover")
+    transaction_cost: float = Field(0.001, ge=0, le=0.05, description="Cost per $ turnover (fallback flat rate)")
+    txn_model: Optional[TransactionCostModel] = None
     initial_capital: float = Field(100000, ge=1000, le=1e9)
 
 class RegimeDefinition(BaseModel):
@@ -174,6 +183,40 @@ def compile_strategy(code: str) -> Dict:
         'pandas': _pd,
         'math': math,
     }
+
+    # ── Inject Position Sizing Libraries ──
+    def __risk_parity(returns: _pd.DataFrame) -> dict:
+        from scipy.optimize import minimize
+        cov = returns.cov().values
+        n = len(cov)
+        if n == 0: return {}
+        def _rc(w):
+            p_var = w.T @ cov @ w
+            if p_var <= 0: return 1e9
+            mrc = (cov @ w) / _np.sqrt(p_var)
+            return _np.sum((w * mrc - p_var/n)**2)
+        res = minimize(_rc, _np.ones(n)/n, bounds=[(0,1)]*n, constraints={'type':'eq', 'fun': lambda w: _np.sum(w)-1})
+        return dict(zip(returns.columns, res.x))
+
+    def __min_variance(returns: _pd.DataFrame) -> dict:
+        from scipy.optimize import minimize
+        cov = returns.cov().values
+        n = len(cov)
+        if n == 0: return {}
+        res = minimize(lambda w: w.T @ cov @ w, _np.ones(n)/n, bounds=[(0,1)]*n, constraints={'type':'eq', 'fun': lambda w: _np.sum(w)-1})
+        return dict(zip(returns.columns, res.x))
+
+    def __kelly_weights(returns: _pd.DataFrame, risk_free_rate=0.0) -> dict:
+        mean = returns.mean() * 252 - risk_free_rate
+        var = returns.var() * 252
+        w = (mean / var.replace(0, 1e-9)).clip(lower=0)
+        tot = w.sum()
+        if tot > 0: w = w / tot
+        return w.to_dict()
+
+    namespace['risk_parity'] = __risk_parity
+    namespace['min_variance'] = __min_variance
+    namespace['kelly_weights'] = __kelly_weights
 
     # Allow common imports
     try:
@@ -527,10 +570,35 @@ class StrategyRunner:
                         new_weights[t] = 0.0
 
                 # Compute turnover cost
+                cost = 0.0
+                model = getattr(cfg, 'txn_model', None)
+                for t in tickers:
+                    old_w = weights_current.get(t, 0.0)
+                    new_w = new_weights.get(t, 0.0)
+                    delta_w = new_w - old_w
+                    if abs(delta_w) < 1e-6: continue
+                    
+                    price = prices_today.get(t)
+                    if price is None or price <= 0: continue
+                    
+                    dollar_amount = abs(delta_w) * capital
+                    shares = dollar_amount / price
+                    
+                    if model:
+                        bid_ask = dollar_amount * (model.spread_bps / 10000.0)
+                        impact = dollar_amount * (model.market_impact_bps / 10000.0)
+                        slippage = dollar_amount * model.slippage_pct
+                        comm = shares * model.commission_per_share
+                        if comm < model.min_commission and shares > 0:
+                            comm = model.min_commission
+                        trade_cost = bid_ask + impact + slippage + comm + model.flat_fee
+                    else:
+                        trade_cost = dollar_amount * cfg.transaction_cost
+                    cost += trade_cost
+
                 old_w = np.array([weights_current.get(t, 0) for t in tickers])
                 new_w = np.array([new_weights.get(t, 0) for t in tickers])
                 turnover = float(np.abs(new_w - old_w).sum())
-                cost = capital * turnover * cfg.transaction_cost
                 capital -= cost
 
                 # Update positions (shares)
@@ -594,6 +662,7 @@ class StrategyRunner:
             'tickers': tickers,
             'benchmark': self.defn.benchmark,
             'config': cfg.dict(),
+            'data': data,
             'daily_log': daily_log,
             'rebalance_log': rebalance_log,
             'regime_history': regime_history,

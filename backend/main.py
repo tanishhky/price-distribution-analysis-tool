@@ -1,8 +1,11 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, date, timedelta
 import asyncio
 import numpy as np
+import time
+import json
 
 from models import (
     FetchRequest, FetchResponse, AnalyzeRequest, AnalyzeResponse,
@@ -29,15 +32,20 @@ from strategy_engine import (
     validate_strategy_code, STRATEGY_TEMPLATES, STRATEGY_API_DOCS,
     validate_manual_strategy_code, run_manual_strategy,
 )
+from wfo_engine import run_walk_forward_optimization
+from tearsheet_engine import compute_tearsheet, monte_carlo_simulation, generate_pdf_report
+from data_quality import check_data_quality
+import database as db
+from config import settings
 import uuid
 import io
 import pandas as pd
 
-app = FastAPI(title="Price Distribution & Volatility Analysis API", version="3.1.0")
+app = FastAPI(title="VolEdge — Quantitative Trading Platform", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=settings.CORS_ORIGINS + ["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -573,6 +581,15 @@ async def run_strategy(req: StrategyRunRequest):
             start_date=req.start_date,
             end_date=req.end_date,
         )
+        
+        # Cache the fetched data so Sensitivity & WFO can use it
+        data = result.pop('data', None)
+        import uuid
+        session_id = str(uuid.uuid4())
+        if data is not None:
+            _manual_data_store[session_id] = data
+            
+        result['session_id'] = session_id
         result['validation_warnings'] = warnings
         return result
     except Exception as e:
@@ -805,3 +822,305 @@ async def run_manual_strategy_endpoint(req: ManualStrategyRunRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Strategy execution error: {str(e)}")
+
+
+# ═══════════════════════════════════════════════
+#  TEARSHEET ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/tearsheet")
+async def strategy_tearsheet(req: dict):
+    """Compute comprehensive tearsheet from strategy results."""
+    daily_log = req.get('daily_log', [])
+    config = req.get('config', {})
+    
+    if not daily_log or len(daily_log) < 2:
+        raise HTTPException(400, "Need at least 2 daily_log entries for tearsheet")
+    
+    try:
+        tearsheet = compute_tearsheet(daily_log, config)
+        return tearsheet
+    except Exception as e:
+        raise HTTPException(500, f"Tearsheet computation error: {str(e)}")
+
+
+@app.post("/strategy/monte-carlo")
+async def strategy_monte_carlo(req: dict):
+    """Run Monte Carlo simulation on strategy results."""
+    daily_log = req.get('daily_log', [])
+    n_sims = req.get('n_simulations', settings.MONTE_CARLO_SIMS)
+    horizon = req.get('horizon_days', 252)
+    
+    if not daily_log or len(daily_log) < 50:
+        raise HTTPException(400, "Need at least 50 daily_log entries for Monte Carlo")
+    
+    try:
+        result = monte_carlo_simulation(daily_log, n_sims=n_sims, horizon_days=horizon)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Monte Carlo error: {str(e)}")
+
+
+@app.post("/strategy/report")
+async def strategy_report(req: dict):
+    """Generate PDF report from strategy tearsheet."""
+    daily_log = req.get('daily_log', [])
+    config = req.get('config', {})
+    strategy_name = req.get('strategy_name', 'Strategy')
+    
+    if not daily_log or len(daily_log) < 2:
+        raise HTTPException(400, "Need daily_log for report generation")
+    
+    try:
+        tearsheet = compute_tearsheet(daily_log, config)
+        pdf_bytes = generate_pdf_report(tearsheet, strategy_name, config)
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="{strategy_name}_tearsheet.pdf"'}
+        )
+    except ImportError as e:
+        raise HTTPException(500, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Report generation error: {str(e)}")
+
+
+# ═══════════════════════════════════════════════
+#  DATA QUALITY ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/data-quality")
+async def data_quality_check(req: dict):
+    """Run data quality checks on uploaded data."""
+    session_id = req.get('session_id', '')
+    if session_id not in _manual_data_store:
+        raise HTTPException(404, "Session not found — upload data first")
+    
+    data = _manual_data_store[session_id]
+    warnings = check_data_quality(data)
+    return {'warnings': warnings, 'session_id': session_id}
+
+
+# ═══════════════════════════════════════════════
+#  STRATEGY LIBRARY ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.get("/strategy/library")
+async def list_saved_strategies():
+    """List all saved strategies."""
+    return {'strategies': db.list_strategies()}
+
+
+@app.post("/strategy/library/save")
+async def save_strategy(req: dict):
+    """Save a strategy to the library."""
+    name = req.get('name', 'Untitled')
+    code = req.get('code', '')
+    config = req.get('config', {})
+    description = req.get('description', '')
+    mode = req.get('mode', 'api')
+    tags = req.get('tags', '')
+    
+    sid = db.save_strategy(name, code, config, description, mode, tags)
+    return {'id': sid, 'message': f'Strategy "{name}" saved'}
+
+
+@app.get("/strategy/library/{strategy_id}")
+async def get_saved_strategy(strategy_id: int):
+    """Get a saved strategy."""
+    s = db.get_strategy(strategy_id)
+    if not s:
+        raise HTTPException(404, "Strategy not found")
+    return s
+
+
+@app.delete("/strategy/library/{strategy_id}")
+async def delete_saved_strategy(strategy_id: int):
+    """Delete a saved strategy."""
+    db.delete_strategy(strategy_id)
+    return {'message': 'Strategy deleted'}
+
+
+@app.put("/strategy/library/{strategy_id}")
+async def update_saved_strategy(strategy_id: int, req: dict):
+    """Update a saved strategy."""
+    db.update_strategy(strategy_id, **req)
+    return {'message': 'Strategy updated'}
+
+
+# ── Backtest Run History ──
+
+@app.get("/strategy/runs")
+async def list_backtest_runs(limit: int = 50):
+    """List recent backtest runs."""
+    return {'runs': db.list_runs(limit)}
+
+
+@app.get("/strategy/runs/{run_id}")
+async def get_backtest_run(run_id: int):
+    """Get details of a backtest run."""
+    r = db.get_run(run_id)
+    if not r:
+        raise HTTPException(404, "Run not found")
+    return r
+
+
+# ═══════════════════════════════════════════════
+#  MULTI-STRATEGY COMPARISON
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/compare")
+async def compare_strategies(req: dict):
+    """Compare multiple strategy results."""
+    results = req.get('results', [])
+    if len(results) < 2:
+        raise HTTPException(400, "Need at least 2 strategy results to compare")
+    
+    comparisons = []
+    all_returns = []
+    
+    for r in results:
+        daily_log = r.get('daily_log', [])
+        if len(daily_log) < 2:
+            continue
+        tearsheet = compute_tearsheet(daily_log, r.get('config', {}))
+        df = pd.DataFrame(daily_log)
+        df['date'] = pd.to_datetime(df['date'])
+        pv = df['portfolio_value'].astype(float)
+        rets = pv.pct_change().dropna()
+        all_returns.append(rets.values)
+        
+        comparisons.append({
+            'name': r.get('name', f'Strategy {len(comparisons)+1}'),
+            'returns': tearsheet['returns'],
+            'risk': tearsheet['risk'],
+            'equity_curve': tearsheet['equity_curve'],
+        })
+    
+    # Correlation matrix
+    corr_matrix = None
+    if len(all_returns) >= 2:
+        min_len = min(len(r) for r in all_returns)
+        trimmed = [r[:min_len] for r in all_returns]
+        corr_np = np.corrcoef(trimmed)
+        corr_matrix = [[round(float(c), 3) for c in row] for row in corr_np]
+    
+    return {
+        'comparisons': comparisons,
+        'correlation_matrix': corr_matrix,
+        'names': [c['name'] for c in comparisons],
+    }
+
+
+# ═══════════════════════════════════════════════
+#  PARAMETER SENSITIVITY (GRID SEARCH)
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/sensitivity")
+async def parameter_sensitivity(req: dict):
+    """Run strategy across parameter grid."""
+    session_id = req.get('session_id', '')
+    code = req.get('code', '')
+    base_config = req.get('config', {})
+    param_grid = req.get('param_grid', {})
+    
+    if not param_grid:
+        raise HTTPException(400, "param_grid is required")
+    
+    if session_id not in _manual_data_store:
+        raise HTTPException(404, "Session not found — upload data first")
+    
+    data = _manual_data_store[session_id]
+    
+    # Generate all combinations
+    import itertools
+    keys = list(param_grid.keys())
+    values = list(param_grid.values())
+    combos = list(itertools.product(*values))
+    
+    if len(combos) > 200:
+        raise HTTPException(400, f"Too many combinations ({len(combos)}). Max 200.")
+    
+    results = []
+    for combo in combos:
+        config = {**base_config}
+        for k, v in zip(keys, combo):
+            config[k] = v
+        
+        try:
+            result, _ = run_manual_strategy(
+                code=code, data=data.copy(),
+                config=config,
+                initial_capital=config.get('initial_capital', 100000),
+            )
+            metrics = result.get('metrics', {})
+            results.append({
+                'params': dict(zip(keys, combo)),
+                'sharpe': metrics.get('sharpe', 0),
+                'total_return': metrics.get('total_return', 0),
+                'max_drawdown': metrics.get('max_drawdown', 0),
+                'volatility': metrics.get('volatility', 0),
+                'annual_return': metrics.get('annual_return', 0),
+            })
+        except Exception as e:
+            results.append({
+                'params': dict(zip(keys, combo)),
+                'error': str(e),
+            })
+    
+    # Check if best is edge case
+    valid = [r for r in results if 'error' not in r]
+    overfit_warning = None
+    if valid:
+        sorted_by_sharpe = sorted(valid, key=lambda x: x['sharpe'], reverse=True)
+        best = sorted_by_sharpe[0]
+        for k in keys:
+            val = best['params'][k]
+            param_vals = param_grid[k]
+            if val == min(param_vals) or val == max(param_vals):
+                overfit_warning = f"Best config uses edge value for '{k}' = {val}. Possible overfit."
+                break
+    
+    return {
+        'results': results,
+        'param_keys': keys,
+        'total_combinations': len(combos),
+        'overfit_warning': overfit_warning,
+    }
+
+
+# ═══════════════════════════════════════════════
+#  WALK-FORWARD OPTIMIZATION (WFO)
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/wfo")
+async def walk_forward_optimization(req: dict):
+    """Run Walk-Forward Optimization out-of-sample backtest."""
+    session_id = req.get('session_id', '')
+    code = req.get('code', '')
+    base_config = req.get('config', {})
+    param_grid = req.get('param_grid', {})
+    n_folds = req.get('n_folds', 5)
+    train_ratio = req.get('train_ratio', 0.7)
+    
+    if not param_grid:
+        raise HTTPException(400, "param_grid is required")
+        
+    if session_id not in _manual_data_store:
+        raise HTTPException(404, "Session not found — upload data first")
+        
+    data = _manual_data_store[session_id]
+    
+    try:
+        result = run_walk_forward_optimization(
+            code=code,
+            data=data,
+            base_config=base_config,
+            param_grid=param_grid,
+            n_folds=n_folds,
+            train_ratio=train_ratio,
+            initial_capital=base_config.get('initial_capital', 100000)
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

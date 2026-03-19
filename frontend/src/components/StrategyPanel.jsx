@@ -14,12 +14,12 @@
  *   - API docs viewer (collapsible)
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { uploadManualData, validateManualStrategy, runManualStrategy } from '../api'
+import { uploadManualData, validateManualStrategy, runManualStrategy, saveToLibrary } from '../api'
 
 const MONO = "'JetBrains Mono', monospace"
 const DM = "'DM Sans', sans-serif"
 
-const API = 'http://localhost:8000'
+const API = '/api'
 
 // ── Collapsible Section ──
 function Section({ title, icon, defaultOpen = false, accent, children }) {
@@ -227,9 +227,47 @@ function ConfigEditor({ config, onChange }) {
   )
 }
 
-// ── Code Editor (simple textarea with line numbers) ──
+// ── Code Editor (Monaco with Python syntax highlighting) ──
 function CodeEditor({ code, onChange, readOnly = false }) {
-  const ref = useRef(null)
+  const [monacoLoaded, setMonacoLoaded] = useState(false)
+  const [MonacoEditor, setMonacoEditor] = useState(null)
+
+  useEffect(() => {
+    import('@monaco-editor/react').then(mod => {
+      setMonacoEditor(() => mod.default)
+      setMonacoLoaded(true)
+    }).catch(() => setMonacoLoaded(false))
+  }, [])
+
+  if (monacoLoaded && MonacoEditor) {
+    return (
+      <div style={{ borderRadius: 4, border: '1px solid #1e2230', overflow: 'hidden' }}>
+        <MonacoEditor
+          height="350px"
+          language="python"
+          theme="vs-dark"
+          value={code}
+          onChange={val => onChange(val || '')}
+          options={{
+            readOnly,
+            fontSize: 12,
+            fontFamily: MONO,
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 4,
+            wordWrap: 'on',
+            lineNumbers: 'on',
+            renderLineHighlight: 'line',
+            bracketPairColorization: { enabled: true },
+            padding: { top: 8 },
+          }}
+        />
+      </div>
+    )
+  }
+
+  // Fallback: plain textarea
   const lines = (code || '').split('\n')
   return (
     <div style={{ position: 'relative', background: '#0d0e12', borderRadius: 4, border: '1px solid #1e2230', overflow: 'hidden' }}>
@@ -242,7 +280,6 @@ function CodeEditor({ code, onChange, readOnly = false }) {
           {lines.map((_, i) => <div key={i}>{i + 1}</div>)}
         </div>
         <textarea
-          ref={ref}
           value={code}
           onChange={e => onChange(e.target.value)}
           readOnly={readOnly}
@@ -526,7 +563,7 @@ const REGIME_COLORS = {
 //  MAIN PANEL
 // ═══════════════════════════════════════════════════
 
-export default function StrategyPanel({ onResult }) {
+export default function StrategyPanel({ onResult, loadedStrategy }) {
   // ── Mode ──
   const [mode, setMode] = useState('api')  // 'api' or 'manual'
 
@@ -559,6 +596,21 @@ export default function StrategyPanel({ onResult }) {
   const [manualBenchmark, setManualBenchmark] = useState('')
   const [manualCode, setManualCode] = useState('')
   const [manualName, setManualName] = useState('Manual Strategy')
+
+  useEffect(() => {
+    if (loadedStrategy) {
+      setMode('manual')
+      setManualName(loadedStrategy.name || 'Loaded Strategy')
+      setManualCode(loadedStrategy.code || '')
+      if (loadedStrategy.config_json) {
+        try {
+          const cfg = JSON.parse(loadedStrategy.config_json)
+          setConfig(cfg)
+          if (cfg.benchmark) setManualBenchmark(cfg.benchmark)
+        } catch(e) {}
+      }
+    }
+  }, [loadedStrategy])
 
   // ── Console state (shared) ──
   const [consoleOutput, setConsoleOutput] = useState('')
@@ -655,7 +707,7 @@ export default function StrategyPanel({ onResult }) {
       setResult(data);
 
       setTimeout(() => {
-        if (onResult) onResult(data);
+        if (onResult) onResult(data, data.session_id, code, config);
       }, 1500);
 
     } catch (e) {
@@ -703,7 +755,7 @@ export default function StrategyPanel({ onResult }) {
       setResult(data);
 
       setTimeout(() => {
-        if (onResult) onResult(data);
+        if (onResult) onResult({ ...data, session_id: sessionId, code: manualCode, config });
       }, 1500);
 
     } catch (e) {
@@ -931,6 +983,21 @@ export default function StrategyPanel({ onResult }) {
               {mode === 'manual' ? 'STRATEGY CODE' : 'REGIME CODE'}
             </span>
             <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={async () => {
+                  const n = window.prompt("Enter a name for this strategy to save it:", activeName)
+                  if (!n) return
+                  try {
+                    await saveToLibrary({ 
+                      name: n, description: '', code: activeCode, config: JSON.stringify(config) 
+                    })
+                    alert("Saved to Library successfully!")
+                  } catch(e) { alert("Error saving: " + e.message) }
+                }}
+                style={{ ...sty.btnSmall, background: '#1d4ed8', color: '#fff', cursor: 'pointer', fontSize: 10, padding: '3px 8px' }}
+              >
+                💾 Save to Library
+              </button>
               <label style={{ ...sty.btnSmall, background: '#374151', color: '#9ca3af', cursor: 'pointer', fontSize: 10, padding: '3px 8px' }}>
                 📁 Upload .py
                 <input type="file" accept=".py,.txt" onChange={handleFileUpload} style={{ display: 'none' }} />
