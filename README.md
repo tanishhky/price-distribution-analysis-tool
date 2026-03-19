@@ -1,4 +1,4 @@
-# ◈ VolEdge — Volatility Trading System v3.0
+# ◈ VolEdge — Volatility Trading System
 
 A full-stack quantitative trading platform that combines **price distribution analysis** (GMM)
 with **options volatility analysis** and **automated trade signal generation**.
@@ -16,6 +16,8 @@ price-distribution-tool/
 │   ├── analysis.py             # D1, D2 distributions + GMM + moment evolution
 │   ├── volatility_engine.py    # Black-Scholes, IV, VRP, signal generation
 │   ├── models.py               # Pydantic data models
+│   ├── strategy_engine.py      # Walk-forward engine, AST validator, sandboxing
+│   ├── strategy_routes.py      # API route definitions for strategy execution
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -33,7 +35,9 @@ price-distribution-tool/
 │   │       ├── SignalsPanel.jsx      # Trade signals with legs, greeks, PnL
 │   │       ├── ResultsPanel.jsx      # Textual narrative output + tables
 │   │       ├── MomentsChart.jsx      # 2×2 moment evolution charts (Mean, σ, Weight, Kurtosis)
-│   │       └── MergePanel.jsx        # Cache file merger with dedup statistics
+│   │       ├── MergePanel.jsx        # Cache file merger with dedup statistics
+│   │       ├── StrategyPanel.jsx     # Strategy config, code editor, and walk-forward execution
+│   │       └── EquityAnimator.jsx    # Animated P&L replay with interactive scrubbing
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
@@ -70,7 +74,13 @@ Evaluates real-time math thresholds against the enriched options chain to output
 - **Instant Restore** — Uploading a cache file skips all API hits and immediately recomputes GMM and options greeks.
 - **Merge Tool** — Dedicated MERGE tab lets you drag-and-drop multiple cache files. It intelligently dedupes overlapping overlapping candles (by timestamp) and contracts (by ID) to synthesize larger continuous datasets.
 
-### 6. Dynamic UI/UX
+### 6. Strategy Lab & Walk-Forward Engine
+- **Zero Look-Ahead Bias** — Upload custom Python code for regime detection and allocation. The engine executes day-by-day, ensuring logic strictly receives `t-1` historical data.
+- **Built-in Templates** — Fast-start with pre-configured strategies including Gaussian HMM Regime Switching, Dual MA Momentum, and simple Volatility thresholding.
+- **Interactive Animator** — Animate walk-forward P&L alongside an overlaid historical price chart, dynamically shaded by active regimes with scrubbing and speed controls.
+- **Strict Sandboxing** — The Python code evaluator strips dangerous built-ins and uses AST parsing to rigidly lock down imports to secure numerical libraries (numpy, pandas, scipy, sklearn, hmmlearn).
+
+### 7. Dynamic UI/UX
 - **Collapsible Sidebar** — The Controls sidebar is draggable/resizable (200px-450px) and collapses into a micro-icon strip to maximize chart space.
 - **Configuration Hub** — A header gear icon ⚙ opens Settings for tweaking batch variables (requests vs delay), option expirations (near/far boundaries), and sliding window ratios.
 - **Theming** — Fully unified dark-mode styling with natively customized WebKit range sliders (`#3b82f6` accents).
@@ -103,6 +113,8 @@ npm run dev
 4. **Vol Scan**: Click **◈ Run Vol Analysis** to pull the options chain and compute the Volatility Surface and Signals.
 5. **Simulate**: Click the ⚙ icon top right to adjust near/far expiration constraints or edit Dividend/Risk-Free rates in the sidebar, then hit **⟳ Reprocess (cached)**.
 6. **Data Portability**: Click **↓ Save** at the bottom of the sidebar to dump raw data. Use the **MERGE** tab to combine it with older saves.
+7. **Strategy Lab**: Switch to the **STRATEGY** tab to code, validate, and execute zero look-ahead bias backtests using your own active regime detection.
+8. **Animator**: Once a strategy successfully executes, navigate to the **ANIMATE** tab to replay the P&L timeline alongside historical price data.
 
 ## API Endpoints
 
@@ -113,6 +125,11 @@ POST /fetch                    → Fetch OHLCV + auto-detects asset class
 POST /analyze                  → GMM distribution + sliding moment evolution
 POST /volatility               → Full vol surface + options + signals pipeline
 POST /volatility/reprocess     → Recalculates greeks + signals instantly (no API)
+POST /strategy/validate        → Validates user-uploaded Python strategy code
+POST /strategy/run             → Executes a walk-forward strategy backtest
+POST /strategy/run-template    → Runs a built-in strategy template
+GET  /strategy/templates       → List of all available strategy templates
+GET  /strategy/docs            → Core API specifications for strategy logic
 ```
 
 ## Limitations & Notes

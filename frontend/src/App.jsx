@@ -11,6 +11,8 @@ import MergePanel from './components/MergePanel'
 import MomentsChart from './components/MomentsChart'
 import SettingsModal, { useSettings } from './components/SettingsModal'
 import { fetchCandles, analyzeData, runVolatilityAnalysis, reprocessVolatility } from './api'
+import StrategyPanel from './components/StrategyPanel'
+import EquityAnimator from './components/EquityAnimator'
 
 const H = 340
 
@@ -23,6 +25,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('charts')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, updateSettings, resetSettings] = useSettings()
+  const [strategyResult, setStrategyResult] = useState(null)
   // Sidebar state
   const [sidebarWidth, setSidebarWidth] = useState(260)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -280,6 +283,8 @@ export default function App() {
     { id: 'signals', label: 'SIGNALS', icon: '⚡', accent: true },
     { id: 'results', label: 'DATA', icon: '≡' },
     { id: 'moments', label: 'MOMENTS', icon: '📈' },
+    { id: 'strategy', label: 'STRATEGY', icon: '⚗', accent: true },
+    { id: 'animate', label: 'ANIMATE', icon: '▶', accent: true },
     { id: 'merge', label: 'MERGE', icon: '⊕' },
   ]
 
@@ -368,7 +373,7 @@ export default function App() {
 
         {/* Content */}
         <div style={S.content}>
-          {!analysis && !loading && (
+          {!analysis && !loading && !['strategy', 'animate', 'merge'].includes(activeTab) && (
             <div style={S.placeholder}>
               <div style={S.placeholderIcon}>◈</div>
               <div style={S.placeholderTitle}>VolEdge Trading System</div>
@@ -462,6 +467,16 @@ export default function App() {
                 </div>
               )}
             </>
+          )}
+          {activeTab === 'strategy' && (
+            <StrategyPanel onResult={(data) => {
+              setStrategyResult(data)
+              setActiveTab('animate')
+            }} />
+          )}
+
+          {activeTab === 'animate' && (
+            <EquityAnimator strategyResult={strategyResult} />
           )}
 
           {activeTab === 'merge' && (
