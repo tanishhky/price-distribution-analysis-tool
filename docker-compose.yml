@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///./data/voledge.db
+      - CORS_ORIGINS=http://localhost,http://localhost:80
+      - MAX_UPLOAD_SIZE_MB=100
+      - SANDBOX_TIMEOUT_SECONDS=300
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

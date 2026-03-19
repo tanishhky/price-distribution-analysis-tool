@@ -28,5 +28,10 @@ Thumbs.db
 
 # Strategy testing data (large files)
 strategy_dummy/
+demo_data/
 *.parquet
 *.csv
+*.log
+*.db
+*.db-shm
+*.db-wal

@@ -1,12 +1,47 @@
-# Install dependencies (one-time)
-cd /Users/tanishkyadav/Documents/price-distribution-tool/backend
-pip3 install -r requirements.txt
+# VolEdge — Quick Start Guide
 
-python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+You can run VolEdge either using Docker (recommended) or locally.
 
+---
+### Option A: Run with Docker Compose (Recommended)
+This requires Docker Desktop to be installed and running.
 
+1. Open a terminal in the root directory:
+   cd /Users/tanishkyadav/Documents/price-distribution-tool
+2. Start the services:
+   docker-compose up --build
+3. Access the app:
+   Frontend: http://localhost:80
+   Backend API Docs: http://localhost:8000/docs
 
-# Install dependencies (one-time)
-cd /Users/tanishkyadav/Documents/price-distribution-tool/frontend
-npm install
-npm run dev
+---
+### Option B: Run Locally (Manual Setup)
+
+#### 1. Backend Setup
+Open a new terminal window:
+   cd /Users/tanishkyadav/Documents/price-distribution-tool/backend
+   
+   # Activate virtual environment (if you have one) or use global Python
+   # python3 -m venv venv
+   # source venv/bin/activate
+   
+   # Install dependencies
+   pip3 install -r requirements.txt
+   
+   # Start the FastAPI server
+   python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+#### 2. Frontend Setup
+Open a second terminal window:
+   cd /Users/tanishkyadav/Documents/price-distribution-tool/frontend
+   
+   # Install dependencies (including Monaco Editor, Plotly, etc.)
+   npm install
+   
+   # Start the Vite development server
+   npm run dev
+
+3. Access the app:
+   Frontend: http://localhost:5173
+   Backend API Docs: http://localhost:8000/docs
+
