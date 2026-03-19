@@ -25,3 +25,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Strategy testing data (large files)
+strategy_dummy/
+*.parquet
+*.csv

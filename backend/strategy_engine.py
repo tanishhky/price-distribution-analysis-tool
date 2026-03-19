@@ -202,6 +202,177 @@ def compile_strategy(code: str) -> Dict:
 
 
 # ═══════════════════════════════════════════════
+#  MANUAL MODE — Validation & Execution
+# ═══════════════════════════════════════════════
+
+def validate_manual_strategy_code(code: str) -> Tuple[bool, str, List[str]]:
+    """
+    Validate user-uploaded manual strategy code.
+    Manual mode requires run_strategy(data, config) -> dict with 'daily_log'.
+    Same security checks as validate_strategy_code().
+
+    Returns: (is_valid, error_message, warnings)
+    """
+    warnings_list = []
+
+    # 1. Parse AST
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, f"Syntax error at line {e.lineno}: {e.msg}", []
+
+    # 2. Check for required function
+    func_names = {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    if 'run_strategy' not in func_names:
+        return False, "Missing required function: run_strategy(data, config)", []
+
+    # 3. Check for forbidden imports
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name.split('.')[0]
+                if mod in FORBIDDEN_MODULES:
+                    return False, f"Forbidden import: '{alias.name}'. Only numpy, pandas, scipy, sklearn, hmmlearn are allowed.", []
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                mod = node.module.split('.')[0]
+                if mod in FORBIDDEN_MODULES:
+                    return False, f"Forbidden import: 'from {node.module}'. Only numpy, pandas, scipy, sklearn, hmmlearn are allowed.", []
+
+    # 4. Check for forbidden calls
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id in FORBIDDEN_BUILTINS:
+                    return False, f"Forbidden call: '{node.func.id}()' is not allowed.", []
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in {'system', 'popen', 'remove', 'rmdir', 'unlink'}:
+                    return False, f"Forbidden call: '.{node.func.attr}()' is not allowed.", []
+
+    # 5. Validate run_strategy signature
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == 'run_strategy':
+            args = [a.arg for a in node.args.args]
+            if len(args) < 2:
+                return False, "run_strategy must accept at least 2 arguments: (data, config)", []
+            break
+
+    # Extra: warn if detect_regime or get_allocations are also present
+    if 'detect_regime' in func_names:
+        warnings_list.append(
+            "detect_regime() found — it will be ignored in Manual Mode. "
+            "Only run_strategy() is called."
+        )
+
+    return True, "", warnings_list
+
+
+def run_manual_strategy(
+    code: str,
+    data: pd.DataFrame,
+    config: Dict[str, Any],
+    initial_capital: float = 100000,
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Execute manual strategy code in a sandbox with console capture.
+
+    The user's code must define:
+        run_strategy(data: pd.DataFrame, config: dict) -> dict
+    The returned dict must contain 'daily_log': list of dicts with at least
+    {date, portfolio_value}.
+
+    Returns: (result_dict, console_output)
+    """
+    import io
+    import sys
+
+    # Compile code in sandbox
+    ns = compile_strategy(code)
+    run_fn = ns.get('run_strategy')
+    if not run_fn:
+        raise ValueError("No run_strategy() function found in code")
+
+    # Capture print output
+    console_buffer = io.StringIO()
+
+    # Replace print in the namespace with a capturing version
+    original_print = print
+    def capturing_print(*args, **kwargs):
+        kwargs_copy = dict(kwargs)
+        kwargs_copy['file'] = console_buffer
+        original_print(*args, **kwargs_copy)
+        # Also write to real stdout for server logs
+        original_print(*args, **kwargs)
+
+    ns['__builtins__']['print'] = capturing_print
+
+    # Execute
+    try:
+        result = run_fn(data.copy(), config)
+    except Exception as e:
+        console_output = console_buffer.getvalue()
+        raise ValueError(
+            f"Strategy execution error: {str(e)}\n\n"
+            f"Console output before error:\n{console_output}"
+        )
+
+    console_output = console_buffer.getvalue()
+
+    # Validate result format
+    if not isinstance(result, dict):
+        raise ValueError(
+            f"run_strategy() must return a dict, got {type(result).__name__}"
+        )
+    if 'daily_log' not in result:
+        raise ValueError(
+            "run_strategy() return dict must contain 'daily_log' key. "
+            "Expected: {'daily_log': [{'date': ..., 'portfolio_value': ...}, ...]}"
+        )
+
+    daily_log = result['daily_log']
+    if not isinstance(daily_log, list) or len(daily_log) == 0:
+        raise ValueError("daily_log must be a non-empty list of dicts")
+
+    # Ensure each entry has required fields
+    for i, entry in enumerate(daily_log):
+        if not isinstance(entry, dict):
+            raise ValueError(f"daily_log[{i}] must be a dict")
+        if 'date' not in entry:
+            raise ValueError(f"daily_log[{i}] missing 'date' field")
+        if 'portfolio_value' not in entry:
+            raise ValueError(f"daily_log[{i}] missing 'portfolio_value' field")
+        # Default optional fields
+        entry.setdefault('benchmark_value', None)
+        entry.setdefault('regime', None)
+        entry.setdefault('rebalanced', False)
+
+    # Compute metrics using existing method
+    df = pd.DataFrame(daily_log)
+    metrics = StrategyRunner._compute_metrics(df, initial_capital)
+
+    # Build full result
+    full_result = {
+        'name': result.get('name', 'Manual Strategy'),
+        'tickers': result.get('tickers', list(data.columns)),
+        'benchmark': result.get('benchmark', ''),
+        'config': config,
+        'daily_log': daily_log,
+        'rebalance_log': result.get('rebalance_log', []),
+        'regime_history': result.get('regime_history', []),
+        'metrics': metrics,
+        'total_days': len(daily_log),
+        'start_date': daily_log[0]['date'] if daily_log else None,
+        'end_date': daily_log[-1]['date'] if daily_log else None,
+    }
+
+    return full_result, console_output
+
+
+
+# ═══════════════════════════════════════════════
 #  WALK-FORWARD ENGINE (ZERO LOOK-AHEAD)
 # ═══════════════════════════════════════════════
 

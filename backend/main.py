@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, date, timedelta
 import asyncio
@@ -27,7 +27,11 @@ from volatility_engine import (
 from strategy_engine import (
     StrategyDefinition, StrategyRunner, StrategyConfig, RegimeDefinition,
     validate_strategy_code, STRATEGY_TEMPLATES, STRATEGY_API_DOCS,
+    validate_manual_strategy_code, run_manual_strategy,
 )
+import uuid
+import io
+import pandas as pd
 
 app = FastAPI(title="Price Distribution & Volatility Analysis API", version="3.1.0")
 
@@ -39,6 +43,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── In-memory store for manual mode uploaded data ──
+_manual_data_store: dict = {}  # session_id -> pd.DataFrame
 
 @app.get("/health")
 async def health():
@@ -622,3 +628,180 @@ async def get_templates():
 async def get_strategy_docs():
     """Return the complete Strategy API specification."""
     return STRATEGY_API_DOCS
+
+
+# ═══════════════════════════════════════════════
+#  MANUAL MODE ENDPOINTS
+# ═══════════════════════════════════════════════
+
+@app.post("/strategy/manual/upload-data")
+async def upload_manual_data(files: list[UploadFile] = File(...)):
+    """
+    Upload one or more data files (CSV, JSON, XLSX).
+    Parses each into a DataFrame and merges them into one.
+    Returns session_id, column names, date range, and row count.
+    """
+    frames = []
+
+    for f in files:
+        content = await f.read()
+        name_lower = (f.filename or '').lower()
+
+        try:
+            if name_lower.endswith('.csv'):
+                df = pd.read_csv(io.BytesIO(content))
+            elif name_lower.endswith('.json'):
+                df = pd.read_json(io.BytesIO(content))
+            elif name_lower.endswith(('.xlsx', '.xls')):
+                df = pd.read_excel(io.BytesIO(content), engine='openpyxl')
+            else:
+                # Try CSV as fallback
+                try:
+                    df = pd.read_csv(io.BytesIO(content))
+                except Exception:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unsupported file format: {f.filename}. Use CSV, JSON, or XLSX."
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to parse '{f.filename}': {str(e)}"
+            )
+
+        # Try to set a date index
+        date_cols = [c for c in df.columns if 'date' in c.lower() or 'time' in c.lower()]
+        if date_cols:
+            try:
+                df[date_cols[0]] = pd.to_datetime(df[date_cols[0]])
+                df = df.set_index(date_cols[0]).sort_index()
+            except Exception:
+                pass  # keep as-is if date parsing fails
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            # Try parsing the index itself as dates
+            try:
+                df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+            except Exception:
+                pass
+
+        frames.append(df)
+
+    # Merge all frames
+    if len(frames) == 1:
+        merged = frames[0]
+    else:
+        merged = pd.concat(frames, axis=1)
+        merged = merged.sort_index()
+
+    # Drop non-numeric columns
+    numeric_df = merged.select_dtypes(include=['number'])
+    if numeric_df.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No numeric columns found in uploaded data. Ensure files contain price data."
+        )
+
+    session_id = str(uuid.uuid4())
+    _manual_data_store[session_id] = numeric_df
+
+    # Build response
+    date_range = None
+    if isinstance(numeric_df.index, pd.DatetimeIndex) and len(numeric_df) > 0:
+        date_range = {
+            'start': str(numeric_df.index[0].date()),
+            'end': str(numeric_df.index[-1].date()),
+        }
+
+    return {
+        'session_id': session_id,
+        'columns': list(numeric_df.columns),
+        'row_count': len(numeric_df),
+        'date_range': date_range,
+        'files_parsed': [f.filename for f in files],
+    }
+
+
+class ManualStrategyRunRequest(BaseModel):
+    session_id: str
+    code: str
+    config: Optional[Dict[str, Any]] = None
+    benchmark: Optional[str] = None
+
+class ManualStrategyValidateRequest(BaseModel):
+    code: str
+
+
+@app.post("/strategy/manual/validate")
+async def validate_manual_strategy(req: ManualStrategyValidateRequest):
+    """Validate manual strategy code without executing it."""
+    is_valid, error, warnings = validate_manual_strategy_code(req.code)
+    return {
+        "valid": is_valid,
+        "error": error if not is_valid else None,
+        "warnings": warnings,
+    }
+
+
+@app.post("/strategy/manual/run")
+async def run_manual_strategy_endpoint(req: ManualStrategyRunRequest):
+    """
+    Execute a manual strategy against uploaded data.
+    Returns results + captured console output.
+    """
+    # 1. Retrieve uploaded data
+    data = _manual_data_store.get(req.session_id)
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found. Please upload data first."
+        )
+
+    # 2. Validate code
+    is_valid, error, warnings = validate_manual_strategy_code(req.code)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy code: {error}")
+
+    # 3. Build config
+    user_config = req.config or {}
+    user_config.setdefault('initial_capital', 100000)
+    initial_capital = user_config['initial_capital']
+
+    # 4. Optionally fetch benchmark data
+    if req.benchmark:
+        try:
+            import yfinance as yf
+            bench_data = yf.download(
+                req.benchmark,
+                start=str(data.index[0].date()) if isinstance(data.index, pd.DatetimeIndex) else None,
+                end=str(data.index[-1].date()) if isinstance(data.index, pd.DatetimeIndex) else None,
+                progress=False,
+            )
+            if not bench_data.empty:
+                if isinstance(bench_data.columns, pd.MultiIndex):
+                    bench_data = bench_data['Close']
+                elif 'Close' in bench_data.columns:
+                    bench_data = bench_data[['Close']]
+                    bench_data.columns = [req.benchmark]
+                data = data.copy()
+                data[req.benchmark] = bench_data.reindex(data.index).values
+        except Exception:
+            pass  # silently skip benchmark if it fails
+
+    # 5. Execute
+    try:
+        result, console_output = run_manual_strategy(
+            code=req.code,
+            data=data,
+            config=user_config,
+            initial_capital=initial_capital,
+        )
+        result['validation_warnings'] = warnings
+        result['console_output'] = console_output
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Strategy execution error: {str(e)}")
