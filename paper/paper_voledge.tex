@@ -1,0 +1,135 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{setspace}
+\usepackage{float}
+\usepackage{enumitem}
+\onehalfspacing
+
+\hypersetup{colorlinks=true,linkcolor=blue!70!black,citecolor=blue!70!black,urlcolor=blue!70!black}
+
+\title{\textbf{VolEdge: A Full-Stack Volatility Trading Platform\\with GMM Price Distributions and\\Walk-Forward Strategy Optimization}}
+\author{Tanishk Yadav\\[2pt]\textit{MS Financial Engineering}\\NYU Tandon School of Engineering\\New York, NY, USA\\[2pt]ORCID: 0009-0006-2382-9411}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+VolEdge is a full-stack quantitative trading platform that combines price distribution analysis using Gaussian Mixture Models (GMM) with options volatility analysis and automated trade signal generation. The backend (FastAPI, 5,610 lines) computes implied volatility and Greeks locally via Black-Scholes, features a sandboxed walk-forward strategy engine with AST validation, parameter sensitivity sweeps with 3D surface visualization, and a walk-forward optimization (WFO) module with tearsheet generation. The frontend (React + Vite, 5,492 lines) provides candlestick charts, GMM decomposition visualization, IV surface/term structure/skew analysis, and an animated equity curve replay with interactive scrubbing. The platform is fully Dockerized and compatible with Polygon.io's free tier.
+
+\medskip
+\noindent\textbf{Keywords:} volatility trading, Gaussian Mixture Models, options pricing, Black-Scholes, walk-forward optimization, full-stack, React, FastAPI
+\end{abstract}
+
+\section{Introduction}
+
+Quantitative trading research typically exists as disconnected notebooks and scripts. VolEdge consolidates the research-to-execution pipeline into a single platform, covering price distribution analysis, options volatility modeling, trade signal generation, and strategy backtesting. The platform is designed for a single user performing volatility-focused research across equities, cryptocurrencies, and forex.
+
+\section{System Architecture}
+
+The platform follows a client-server architecture with Docker Compose orchestration.
+
+\subsection{Backend (FastAPI)}
+
+The backend comprises 10 Python modules totaling 5,610 lines:
+
+\begin{itemize}[nosep]
+    \item \texttt{main.py}: FastAPI application with all endpoint definitions.
+    \item \texttt{polygon\_client.py}: Polygon.io API client for stock, crypto, and forex OHLCV data with parallel fetching for multi-asset analysis.
+    \item \texttt{options\_client.py}: Options contract discovery and historical bars from Polygon.io.
+    \item \texttt{analysis.py}: Core distribution analysis---D1 (full period) and D2 (recent window) price distributions, GMM fitting with automatic component selection, and moment evolution tracking (mean, variance, weight, kurtosis over rolling windows).
+    \item \texttt{volatility\_engine.py}: Black-Scholes pricing, implied volatility computation via Brent's method, volatility risk premium (VRP) estimation, and automated trade signal generation based on IV/RV dislocations.
+    \item \texttt{strategy\_engine.py}: Walk-forward backtesting engine. User strategies are written in Python and validated via AST (Abstract Syntax Tree) analysis before execution to prevent arbitrary code injection. The engine runs strategies in a sandboxed environment with restricted imports.
+    \item \texttt{strategy\_routes.py}: API routes for strategy execution, parameter sweeps, and optimization.
+    \item \texttt{tearsheet\_engine.py}: Generates quantitative performance reports (Sharpe, Sortino, Calmar, drawdown analysis, monthly returns heatmap).
+    \item \texttt{wfo\_engine.py}: Walk-forward optimization with configurable training/testing window ratios, metric-based parameter selection, and out-of-sample performance tracking.
+    \item \texttt{data\_quality.py}: Data validation, gap detection, and corporate action adjustment.
+\end{itemize}
+
+\subsection{Frontend (React + Vite)}
+
+The frontend comprises 15 JSX components totaling 5,492 lines:
+
+\begin{itemize}[nosep]
+    \item \texttt{CandlestickChart.jsx}: Interactive OHLCV chart with volume overlay using Plotly.
+    \item \texttt{DistributionChart.jsx}: D1/D2 histograms with kernel density estimation overlay.
+    \item \texttt{GMMChart.jsx}: GMM component decomposition showing individual Gaussian components and their weights.
+    \item \texttt{ComparisonChart.jsx}: D1 vs. D2 distribution overlay for regime shift detection.
+    \item \texttt{VolatilityPanel.jsx}: IV surface (strike $\times$ expiry), term structure, skew visualization, and full options chain table.
+    \item \texttt{SignalsPanel.jsx}: Trade signals with specific option legs, net Greeks, and projected P\&L scenarios.
+    \item \texttt{MomentsChart.jsx}: 2$\times$2 panel showing GMM moment evolution over time.
+    \item \texttt{StrategyPanel.jsx}: Code editor for custom strategy definitions with syntax highlighting, configuration panel, and walk-forward execution trigger.
+    \item \texttt{SensitivityPanel.jsx}: 3D surface plot of strategy performance metrics across parameter combinations.
+    \item \texttt{WfoPanel.jsx}: Walk-forward optimization results with train/test metric comparison.
+    \item \texttt{TearsheetPanel.jsx}: Comprehensive strategy performance report.
+    \item \texttt{EquityAnimator.jsx}: Animated equity curve replay with interactive scrubbing and playback controls.
+\end{itemize}
+
+\section{Core Analytical Methods}
+
+\subsection{Price Distribution Analysis}
+
+For a given asset, VolEdge fits two distributions:
+\begin{itemize}[nosep]
+    \item \textbf{D1}: Distribution over the full historical period, representing the ``base case'' regime.
+    \item \textbf{D2}: Distribution over a recent window (configurable), capturing the current regime.
+\end{itemize}
+
+Each distribution is modeled as a Gaussian Mixture Model with $K$ components selected via BIC minimization:
+\begin{equation}
+    p(x) = \sum_{k=1}^{K} \pi_k \, \mathcal{N}(x \mid \mu_k, \sigma_k^2)
+\end{equation}
+
+Moment evolution tracks how each component's mean, variance, weight, and kurtosis change over rolling windows, providing a visual representation of regime shifts.
+
+\subsection{Options Volatility Engine}
+
+Implied volatility is computed by inverting the Black-Scholes formula via Brent's root-finding method. The engine constructs:
+\begin{itemize}[nosep]
+    \item \textbf{IV Surface}: Implied volatility as a function of strike price and time to expiration.
+    \item \textbf{Term Structure}: At-the-money IV across expiration dates.
+    \item \textbf{Skew}: IV as a function of moneyness for a fixed expiration.
+    \item \textbf{VRP}: Volatility Risk Premium = IV $-$ RV, where RV is realized volatility over a trailing window.
+\end{itemize}
+
+Trade signals are generated when VRP exceeds configurable thresholds, with specific option structures (straddles, strangles, spreads) selected based on the signal direction and magnitude.
+
+\subsection{Walk-Forward Strategy Engine}
+
+The strategy engine accepts user-defined Python strategies, validates them via AST analysis (rejecting dangerous operations like \texttt{exec}, \texttt{eval}, file I/O, and network calls), and executes them in a walk-forward framework. The engine supports:
+\begin{itemize}[nosep]
+    \item Configurable train/test split ratios
+    \item Parameter grid search within each training window
+    \item Out-of-sample performance tracking
+    \item Sensitivity analysis via 2D parameter sweeps rendered as 3D surface plots
+\end{itemize}
+
+\section{Limitations}
+
+\begin{itemize}[nosep]
+    \item \textbf{Black-Scholes assumption}: Constant volatility and log-normal returns are unrealistic. Stochastic volatility models (Heston, SABR) are not yet implemented.
+    \item \textbf{Single-asset strategies}: The walk-forward engine does not support multi-asset or cross-instrument strategies.
+    \item \textbf{No live trading}: The platform is research-only; there is no brokerage API integration for paper or live trading.
+    \item \textbf{Frontend UX}: The interface is functional but not polished for non-technical users.
+    \item \textbf{Polygon.io free tier}: Rate limits and data delays on the free tier constrain real-time analysis.
+\end{itemize}
+
+\section{Conclusion}
+
+VolEdge demonstrates that a comprehensive volatility trading research platform can be built as a single full-stack application. The 11,102-line codebase (5,610 backend + 5,492 frontend) integrates price distribution analysis, options volatility modeling, automated signal generation, and walk-forward strategy optimization with parameter sensitivity analysis. The platform is Dockerized for reproducible deployment and extensible for future enhancements including stochastic volatility pricing and live trading integration.
+
+\medskip
+\noindent\textbf{Code Availability:} \url{https://github.com/tanishhky/price-distribution-analysis-tool}
+
+\begin{thebibliography}{5}
+\bibitem{black1973} F.~Black and M.~Scholes, ``The pricing of options and corporate liabilities,'' \textit{Journal of Political Economy}, vol.~81, no.~3, pp.~637--654, 1973.
+\bibitem{mclachlan2000} G.~McLachlan and D.~Peel, \textit{Finite Mixture Models}. New York: Wiley, 2000.
+\bibitem{gatheral2006} J.~Gatheral, \textit{The Volatility Surface: A Practitioner's Guide}. Hoboken, NJ: Wiley, 2006.
+\end{thebibliography}
+
+\end{document}
