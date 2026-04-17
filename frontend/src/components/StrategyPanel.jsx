@@ -704,6 +704,8 @@ export default function StrategyPanel({ onResult, loadedStrategy }) {
       }
 
       setStatusText("Completed!");
+      data.code = code; // 🔹 Inject code for Sensitivity & WFO panels
+      data.session_id = data.session_id || sessionId; // Ensure session_id is preserved
       setResult(data);
 
       setTimeout(() => {
@@ -752,6 +754,8 @@ export default function StrategyPanel({ onResult, loadedStrategy }) {
       }
 
       setStatusText("Completed!");
+      data.code = manualCode; // 🔹 Inject code for Sensitivity & WFO panels
+      data.session_id = sessionId; // 🔹 Inject session ID for Manual mode runs
       setResult(data);
 
       setTimeout(() => {

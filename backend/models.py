@@ -226,11 +226,11 @@ class VolatilityRequest(BaseModel):
     gmm_d2: Optional[GMMResult] = None  # pass GMM results for enhanced analysis
     risk_free_rate: float = 0.05
     dividend_yield: float = 0.0
-    near_expiry_min_days: int = 7
-    near_expiry_max_days: int = 45
-    far_expiry_min_days: int = 46
-    far_expiry_max_days: int = 180
-    strike_range_pct: float = 0.15     # +/- 15% from spot
+    near_expiry_min_days: int = 1
+    near_expiry_max_days: int = 14
+    far_expiry_min_days: int = 15
+    far_expiry_max_days: int = 40
+    strike_range_pct: float = 0.05     # +/- 5% from spot
     batch_size: int = 5                # requests per key per batch
     batch_delay: int = 61              # seconds between batches
 
@@ -245,11 +245,11 @@ class ReprocessRequest(BaseModel):
     gmm_d2: Optional[GMMResult] = None
     risk_free_rate: float = 0.05
     dividend_yield: float = 0.0
-    near_expiry_min_days: int = 7
-    near_expiry_max_days: int = 45
-    far_expiry_min_days: int = 46
-    far_expiry_max_days: int = 180
-    strike_range_pct: float = 0.15
+    near_expiry_min_days: int = 1
+    near_expiry_max_days: int = 14
+    far_expiry_min_days: int = 15
+    far_expiry_max_days: int = 40
+    strike_range_pct: float = 0.05
     # Cached data from a previous /volatility call
     cached_contracts: List[OptionContract]
     cached_bars: Dict[str, Any]        # option_ticker -> {close, volume, ...}

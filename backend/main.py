@@ -81,12 +81,15 @@ async def fetch(req: FetchRequest):
         if asset_class == "auto":
             asset_class = detect_asset_class(req.ticker)
 
-        n_keys = len(req.api_keys)
+        keys = req.api_keys if req.api_keys else settings.POLYGON_API_KEYS
+        if not keys:
+            raise HTTPException(status_code=400, detail="No Polygon API keys provided.")
+        n_keys = len(keys)
 
         if n_keys > 1:
             # Parallel multi-key fetch
             candles = await fetch_candles_parallel(
-                api_keys=req.api_keys,
+                api_keys=keys,
                 ticker=req.ticker,
                 asset_class=asset_class,
                 timeframe=req.timeframe,
@@ -96,7 +99,7 @@ async def fetch(req: FetchRequest):
         else:
             # Single key — sequential
             candles = await fetch_candles(
-                api_key=req.api_keys[0],
+                api_key=keys[0],
                 ticker=req.ticker,
                 asset_class=asset_class,
                 timeframe=req.timeframe,
@@ -241,8 +244,12 @@ async def volatility_analysis(req: VolatilityRequest):
         exp_gte = (today + timedelta(days=req.near_expiry_min_days)).strftime("%Y-%m-%d")
         exp_lte = (today + timedelta(days=req.far_expiry_max_days)).strftime("%Y-%m-%d")
 
+        keys = req.api_keys if req.api_keys else settings.POLYGON_API_KEYS
+        if not keys:
+            raise HTTPException(status_code=400, detail="No Polygon API keys provided.")
+            
         contracts = await fetch_options_contracts(
-            api_key=req.api_keys[0],
+            api_key=keys[0],
             underlying_ticker=req.ticker,
             expiration_date_gte=exp_gte,
             expiration_date_lte=exp_lte,
@@ -268,7 +275,7 @@ async def volatility_analysis(req: VolatilityRequest):
         bar_date_str = bar_date.strftime("%Y-%m-%d")
 
         # Polygon free tier: 5 req/min/key. Configurable via settings.
-        n_keys = len(req.api_keys)
+        n_keys = len(keys)
         batch_size = req.batch_size  # requests per key per batch
         total_rate = batch_size * n_keys
 
@@ -294,7 +301,7 @@ async def volatility_analysis(req: VolatilityRequest):
                 for contract in key_contracts:
                     try:
                         bar = await fetch_option_daily_bar(
-                            api_key=req.api_keys[key_idx],
+                            api_key=keys[key_idx],
                             option_ticker=contract.ticker,
                             date=bar_date_str,
                         )

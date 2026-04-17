@@ -65,6 +65,9 @@ price-distribution-tool/
 
 Check out the interactive backtesting and analysis features:
 
+- **BKM Moments & Volatility Analysis:** Fetch options chains, compute risk-neutral moments via BKM, and generate trading signals.
+![Volatility & BKM Panel Demo](assets/demos/bkm_vol_demo.webp)
+
 - **API Mode Walk-Forward Execution:** Execute complex multi-regime strategies with zero look-ahead bias right out of the box.
 ![Strategy API Execution Demo](assets/demos/strategy_demo.webp)
 

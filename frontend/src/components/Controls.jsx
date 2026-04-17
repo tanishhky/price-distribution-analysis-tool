@@ -17,7 +17,10 @@ export default function Controls({
   const [ticker, setTicker] = useState('SPY')
   const [assetClass, setAssetClass] = useState('auto')
   const [timeframe, setTimeframe] = useState('1day')
-  const [startDate, setStartDate] = useState('2024-01-01')
+  
+  const defaultStartDate = new Date()
+  defaultStartDate.setFullYear(defaultStartDate.getFullYear() - 1)
+  const [startDate, setStartDate] = useState(defaultStartDate.toISOString().slice(0, 10))
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10))
   const [numBins, setNumBins] = useState(200)
   const [nComponents, setNComponents] = useState(0)
@@ -46,7 +49,6 @@ export default function Controls({
 
   const handleSubmit = () => {
     const keys = parseKeys()
-    if (keys.length === 0) return alert('Enter at least one Polygon.io API key.')
     if (!ticker.trim()) return alert('Enter a ticker symbol.')
     onFetchAndAnalyze({
       api_keys: keys, ticker: ticker.trim().toUpperCase(), asset_class: assetClass,
@@ -66,7 +68,6 @@ export default function Controls({
 
   const handleVolatility = () => {
     const keys = parseKeys()
-    if (keys.length === 0) return alert('Enter at least one Polygon.io API key.')
     if (!ticker.trim()) return alert('Enter a ticker symbol.')
     onRunVolatility({
       api_keys: keys, ticker: ticker.trim().toUpperCase(),
@@ -119,7 +120,7 @@ export default function Controls({
         {/* API Key */}
         <Section title="CONNECTION" id="conn" collapsed={collapsed} toggle={toggle}>
           <textarea value={apiKeyInput} onChange={e => handleApiKeyInput(e.target.value)}
-            placeholder="Polygon.io API key(s) — one per line, comma, or space separated"
+            placeholder="Leave blank to use backend .env keys, or enter keys here"
             rows={2}
             style={{ ...S.input, resize: 'vertical', minHeight: 32 }} />
           {parseKeys().length > 0 && (
