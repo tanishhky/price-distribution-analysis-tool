@@ -245,6 +245,61 @@ def fit_synced_gmm(
     return gmm_d1, gmm_d2, best_n
 
 
+def _mahalanobis_match(
+    prev_comps: List[Tuple[float, float]],
+    new_comps: List[Tuple[float, float]],
+    threshold: float = 3.0,
+) -> List[int]:
+    """
+    Match new GMM components to previous ones using Mahalanobis distance
+    in (mean, sigma) space.
+
+    Returns mapping[j] = slot index for new_comps[j].
+    If best match > threshold, assigns a fresh slot (new component series).
+    """
+    n_prev = len(prev_comps)
+    n_new = len(new_comps)
+
+    if n_prev == 0:
+        return list(range(n_new))
+
+    prev_arr = np.array(prev_comps)
+    new_arr = np.array(new_comps)
+
+    # Build distance matrix
+    dist = np.full((n_new, n_prev), np.inf)
+    for j in range(n_new):
+        for i in range(n_prev):
+            pm, ps = prev_arr[i]
+            nm, ns = new_arr[j]
+            scale_mean = max(ps, 1e-8)
+            scale_sigma = max(ps * 0.5, 1e-8)
+            d = np.sqrt(((nm - pm) / scale_mean) ** 2 + ((ns - ps) / scale_sigma) ** 2)
+            dist[j, i] = d
+
+    # Greedy matching by ascending distance
+    mapping = [-1] * n_new
+    used_prev = set()
+    pairs = sorted(
+        [(dist[j, i], j, i) for j in range(n_new) for i in range(n_prev)]
+    )
+    for d, j, i in pairs:
+        if mapping[j] >= 0 or i in used_prev:
+            continue
+        if d <= threshold:
+            mapping[j] = i
+            used_prev.add(i)
+
+    # Assign unmatched to new slots
+    next_idx = n_prev
+    for j in range(n_new):
+        if mapping[j] < 0:
+            mapping[j] = next_idx
+            next_idx += 1
+
+    return mapping
+
+
 def compute_moment_evolution(
     candles: List[Candle],
     window_size: int = 60,
@@ -257,11 +312,11 @@ def compute_moment_evolution(
     Slide a window across candles, fit GMM at each step.
     Track per-component (mean, sigma, weight) + mixture kurtosis over time.
 
-    FIX: When n_components is provided, always use it consistently for every window.
-    When n_components is None AND sync_gmm is True, determine N from first window
-    via synced BIC, then use that N for all subsequent windows.
-    When n_components is None AND sync_gmm is False, determine N from first window
-    via individual BIC for D1, then use that N for all subsequent windows.
+    FIX v4: Uses Mahalanobis-distance matching between windows to prevent
+    discontinuous jumps when component ordering shifts.  Each new window's
+    components are matched to the closest previous components in (mean, sigma)
+    space.  If the best match exceeds 3 sigmas, the component is treated as
+    new (separate series), preventing false continuity.
 
     Returns:
       { timestamps: [...], d1: { components: [{mean:[], sigma:[], weight:[]}], mixture_kurtosis:[] },
@@ -274,6 +329,10 @@ def compute_moment_evolution(
     timestamps = []
     d1_data: Dict[str, Any] = {"components": [], "mixture_kurtosis": []}
     d2_data: Dict[str, Any] = {"components": [], "mixture_kurtosis": []}
+
+    # Store previous window's component params for matching
+    d1_prev_comps: List[Tuple[float, float]] = []
+    d2_prev_comps: List[Tuple[float, float]] = []
 
     # Determine fixed N from first window if not explicitly set
     if n_components is None or n_components < 1:
@@ -297,15 +356,49 @@ def compute_moment_evolution(
             gmm_d1 = fit_gmm(bc_arr, d1_raw, n_components_override=n_components)
             gmm_d2 = fit_gmm(bc_arr, d2_raw, n_components_override=n_components)
 
-            for dist_data, gmm in [(d1_data, gmm_d1), (d2_data, gmm_d2)]:
-                # Ensure component slots exist
-                while len(dist_data["components"]) < gmm.n_components:
-                    dist_data["components"].append({"mean": [], "sigma": [], "weight": []})
+            for dist_data, gmm, prev_key in [
+                (d1_data, gmm_d1, "d1"),
+                (d2_data, gmm_d2, "d2"),
+            ]:
+                prev_comps = d1_prev_comps if prev_key == "d1" else d2_prev_comps
 
-                for i, comp in enumerate(gmm.components):
-                    dist_data["components"][i]["mean"].append(comp.mean)
-                    dist_data["components"][i]["sigma"].append(comp.std_dev)
-                    dist_data["components"][i]["weight"].append(comp.weight)
+                # Extract current component params
+                cur_comps = [(c.mean, c.std_dev) for c in gmm.components]
+
+                # Match to previous window's components
+                mapping = _mahalanobis_match(prev_comps, cur_comps)
+
+                # Ensure enough component slots exist
+                max_idx = max(mapping) if mapping else -1
+                while len(dist_data["components"]) <= max_idx:
+                    n_prev_ts = len(timestamps) - 1
+                    dist_data["components"].append({
+                        "mean": [None] * n_prev_ts,
+                        "sigma": [None] * n_prev_ts,
+                        "weight": [None] * n_prev_ts,
+                    })
+
+                # Write current values into matched slots
+                written = set()
+                for j, comp in enumerate(gmm.components):
+                    slot = mapping[j]
+                    dist_data["components"][slot]["mean"].append(comp.mean)
+                    dist_data["components"][slot]["sigma"].append(comp.std_dev)
+                    dist_data["components"][slot]["weight"].append(comp.weight)
+                    written.add(slot)
+
+                # Fill None for any existing slots not matched this window
+                for slot in range(len(dist_data["components"])):
+                    if slot not in written:
+                        dist_data["components"][slot]["mean"].append(None)
+                        dist_data["components"][slot]["sigma"].append(None)
+                        dist_data["components"][slot]["weight"].append(None)
+
+                # Update previous components for next iteration
+                if prev_key == "d1":
+                    d1_prev_comps = cur_comps
+                else:
+                    d2_prev_comps = cur_comps
 
                 # Mixture kurtosis: excess kurtosis of the full mixture PDF
                 weights = np.array([c.weight for c in gmm.components])

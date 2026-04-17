@@ -23,9 +23,10 @@ from options_client import (
 from analysis import build_distributions, fit_gmm, fit_synced_gmm, generate_results_text, compute_moment_evolution
 from volatility_engine import (
     compute_realized_vol, compute_parkinson_vol, compute_gmm_weighted_vol,
-    enrich_contract, build_iv_surface, compute_atm_iv, compute_put_call_skew,
-    generate_signals, generate_vol_summary, _candles_per_day,
+    enrich_contract, build_iv_surface, compute_atm_iv, compute_atm_iv_at_tenor,
+    compute_put_call_skew, generate_signals, generate_vol_summary, _candles_per_day,
 )
+from bkm_engine import compute_bkm_moments
 
 from strategy_engine import (
     StrategyDefinition, StrategyRunner, StrategyConfig, RegimeDefinition,
@@ -334,8 +335,10 @@ async def volatility_analysis(req: VolatilityRequest):
         # ── Step 4-6: Build surface, compute metrics, generate signals ──
         surface = build_iv_surface(enriched_chain)
 
-        atm_iv_near, atm_iv_far = compute_atm_iv(
-            enriched_chain, spot, req.near_expiry_max_days, req.far_expiry_min_days)
+        atm_iv_near = compute_atm_iv(
+            enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
+        atm_iv_far = compute_atm_iv(
+            enriched_chain, req.far_expiry_min_days, req.far_expiry_max_days)
 
         term_structure = "flat"
         if atm_iv_near and atm_iv_far:
@@ -345,12 +348,16 @@ async def volatility_analysis(req: VolatilityRequest):
             elif diff < -0.01:
                 term_structure = "backwardation"
 
-        skew_25d = compute_put_call_skew(enriched_chain)
+        skew_25d = compute_put_call_skew(
+            enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
 
-        # VRP
-        vrp_10 = (atm_iv_near - rv_10) if (atm_iv_near and rv_10) else None
-        vrp_20 = (atm_iv_near - (rv_best_20 or 0)) if atm_iv_near else None
-        vrp_30 = (atm_iv_near - rv_30) if (atm_iv_near and rv_30) else None
+        # VRP — tenor-matched: compare IV at specific tenors to matching RV
+        iv_10d = compute_atm_iv_at_tenor(enriched_chain, spot, 10)
+        iv_20d = compute_atm_iv_at_tenor(enriched_chain, spot, 20)
+        iv_30d = compute_atm_iv_at_tenor(enriched_chain, spot, 30)
+        vrp_10 = (iv_10d - rv_10) if (iv_10d and rv_10) else None
+        vrp_20 = (iv_20d - (rv_best_20 or 0)) if iv_20d else None
+        vrp_30 = (iv_30d - rv_30) if (iv_30d and rv_30) else None
 
         vol_analysis = VolatilityAnalysis(
             underlying_ticker=req.ticker,
@@ -365,16 +372,21 @@ async def volatility_analysis(req: VolatilityRequest):
             gmm_weighted_kurtosis=gmm_kurt if gmm_vol > 0 else None,
             atm_iv_near=atm_iv_near,
             atm_iv_far=atm_iv_far,
-            term_structure=term_structure,
+            iv_term_structure=term_structure,
             put_call_skew_25d=skew_25d,
             vrp_10d=vrp_10,
             vrp_20d=vrp_20,
             vrp_30d=vrp_30,
-            surface=surface,
+            surface_points=surface,
             chain=enriched_chain,
         )
 
-        signals = generate_signals(vol_analysis, req.gmm_d2, spot)
+        signals = generate_signals(vol_analysis, enriched_chain, req.gmm_d2, spot, req.risk_free_rate)
+
+        # BKM model-free risk-neutral moments
+        vol_analysis.rn_bkm_30d = compute_bkm_moments(enriched_chain, spot, req.risk_free_rate, 30)
+        vol_analysis.rn_bkm_60d = compute_bkm_moments(enriched_chain, spot, req.risk_free_rate, 60)
+
         summary = generate_vol_summary(vol_analysis, signals)
 
         return VolatilityResponse(
@@ -452,8 +464,10 @@ async def reprocess_volatility(req: ReprocessRequest):
         # ── Steps 3-5: Surface, metrics, signals ──
         surface = build_iv_surface(enriched_chain)
 
-        atm_iv_near, atm_iv_far = compute_atm_iv(
-            enriched_chain, spot, req.near_expiry_max_days, req.far_expiry_min_days)
+        atm_iv_near = compute_atm_iv(
+            enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
+        atm_iv_far = compute_atm_iv(
+            enriched_chain, req.far_expiry_min_days, req.far_expiry_max_days)
 
         term_structure = "flat"
         if atm_iv_near and atm_iv_far:
@@ -463,11 +477,16 @@ async def reprocess_volatility(req: ReprocessRequest):
             elif diff < -0.01:
                 term_structure = "backwardation"
 
-        skew_25d = compute_put_call_skew(enriched_chain)
+        skew_25d = compute_put_call_skew(
+            enriched_chain, req.near_expiry_min_days, req.near_expiry_max_days)
 
-        vrp_10 = (atm_iv_near - rv_10) if (atm_iv_near and rv_10) else None
-        vrp_20 = (atm_iv_near - (rv_best_20 or 0)) if atm_iv_near else None
-        vrp_30 = (atm_iv_near - rv_30) if (atm_iv_near and rv_30) else None
+        # VRP — tenor-matched: compare IV at specific tenors to matching RV
+        iv_10d = compute_atm_iv_at_tenor(enriched_chain, spot, 10)
+        iv_20d = compute_atm_iv_at_tenor(enriched_chain, spot, 20)
+        iv_30d = compute_atm_iv_at_tenor(enriched_chain, spot, 30)
+        vrp_10 = (iv_10d - rv_10) if (iv_10d and rv_10) else None
+        vrp_20 = (iv_20d - (rv_best_20 or 0)) if iv_20d else None
+        vrp_30 = (iv_30d - rv_30) if (iv_30d and rv_30) else None
 
         vol_analysis = VolatilityAnalysis(
             underlying_ticker=req.ticker,
@@ -482,16 +501,21 @@ async def reprocess_volatility(req: ReprocessRequest):
             gmm_weighted_kurtosis=gmm_kurt if gmm_vol > 0 else None,
             atm_iv_near=atm_iv_near,
             atm_iv_far=atm_iv_far,
-            term_structure=term_structure,
+            iv_term_structure=term_structure,
             put_call_skew_25d=skew_25d,
             vrp_10d=vrp_10,
             vrp_20d=vrp_20,
             vrp_30d=vrp_30,
-            surface=surface,
+            surface_points=surface,
             chain=enriched_chain,
         )
 
-        signals = generate_signals(vol_analysis, req.gmm_d2, spot)
+        signals = generate_signals(vol_analysis, enriched_chain, req.gmm_d2, spot, req.risk_free_rate)
+
+        # BKM model-free risk-neutral moments
+        vol_analysis.rn_bkm_30d = compute_bkm_moments(enriched_chain, spot, req.risk_free_rate, 30)
+        vol_analysis.rn_bkm_60d = compute_bkm_moments(enriched_chain, spot, req.risk_free_rate, 60)
+
         summary = generate_vol_summary(vol_analysis, signals)
 
         return VolatilityResponse(

@@ -385,6 +385,33 @@ def compute_atm_iv(chain: List[OptionContractWithGreeks], min_dte: int, max_dte:
     return float(np.mean([c.implied_volatility for c in candidates]))
 
 
+def compute_atm_iv_at_tenor(
+    chain: List[OptionContractWithGreeks],
+    spot: float,
+    target_dte: int,
+    dte_tolerance: int = 7,
+) -> Optional[float]:
+    """
+    ATM IV weighted by inverse distance from target_dte.
+
+    Instead of a simple average across a wide DTE bucket, this weights
+    candidates by 1/(1 + |dte - target_dte|) so contracts closest to the
+    desired tenor dominate.  Used for tenor-matched VRP computation.
+    """
+    candidates = [
+        c for c in chain
+        if c.implied_volatility and c.days_to_expiry
+        and abs(c.days_to_expiry - target_dte) <= dte_tolerance
+        and c.moneyness and 0.95 <= c.moneyness <= 1.05
+    ]
+    if not candidates:
+        return None
+
+    weights = np.array([1.0 / (1.0 + abs(c.days_to_expiry - target_dte)) for c in candidates])
+    ivs = np.array([c.implied_volatility for c in candidates])
+    return float(np.average(ivs, weights=weights))
+
+
 def compute_put_call_skew(chain: List[OptionContractWithGreeks], min_dte: int, max_dte: int) -> Optional[float]:
     """
     25-delta put/call skew: IV(25d put) - IV(25d call).
@@ -416,6 +443,27 @@ def compute_put_call_skew(chain: List[OptionContractWithGreeks], min_dte: int, m
 #  TRADE SIGNAL GENERATION
 # ═══════════════════════════════════════════════
 
+def _compute_leg_spread_cost(leg: dict, default_haircut_pct: float = 0.03) -> float:
+    """
+    Estimate half-spread cost for a single option leg.
+
+    If bid/ask are available on the leg, cost = (ask - bid) / 2.
+    Otherwise, apply a configurable haircut (default 3%) to mid price.
+    Returns cost per-share (multiply by 100 for per-contract).
+    """
+    bid = leg.get("bid")
+    ask = leg.get("ask")
+    mid = leg.get("mid")
+
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        return (ask - bid) / 2.0
+
+    if mid is not None and mid > 0:
+        return mid * default_haircut_pct
+
+    return 0.0
+
+
 def generate_signals(
     vol_analysis: VolatilityAnalysis,
     chain: List[OptionContractWithGreeks],
@@ -423,7 +471,12 @@ def generate_signals(
     spot: float,
     r: float,
 ) -> List[TradeSignal]:
-    """Generate actionable trade signals based on volatility analysis."""
+    """Generate actionable trade signals based on volatility analysis.
+
+    FIX v4: All P&L estimates now account for transaction costs.
+    For each leg, half the bid-ask spread is deducted on entry and exit.
+    If only last-trade price is available, a 3% haircut is applied.
+    """
     signals: List[TradeSignal] = []
 
     # ── Signal 1: Volatility Risk Premium (sell premium when VRP high) ──
@@ -473,8 +526,10 @@ def generate_signals(
                     "mid": sp.mid_price,
                 })
 
-            # Estimate P&L
-            total_credit = sum(l.get("mid", 0) or 0 for l in legs) * 100
+            # Estimate P&L (with transaction costs)
+            spread_cost = sum(_compute_leg_spread_cost(l) for l in legs) * 100  # entry + exit = 2 crossings
+            total_credit_gross = sum(l.get("mid", 0) or 0 for l in legs) * 100
+            total_credit = total_credit_gross - spread_cost  # net after spread
 
             # Correct max-loss semantics:
             #   - Short Strangle (2 legs): theoretically unlimited (call side).
@@ -516,6 +571,7 @@ def generate_signals(
                 net_theta=None,
                 net_vega=None,
                 net_gamma=None,
+                estimated_execution_cost=round(spread_cost, 2) if spread_cost > 0 else None,
             ))
 
     # ── Signal 2: Put Skew Trade ──
@@ -567,7 +623,9 @@ def generate_signals(
                 })
 
             if len(legs) == 2:
-                credit = ((legs[0].get("mid", 0) or 0) - (legs[1].get("mid", 0) or 0)) * 100
+                spread_cost = sum(_compute_leg_spread_cost(l) for l in legs) * 100
+                credit_gross = ((legs[0].get("mid", 0) or 0) - (legs[1].get("mid", 0) or 0)) * 100
+                credit = credit_gross - spread_cost
                 width = abs(legs[0]["strike"] - legs[1]["strike"]) * 100
                 max_loss = width - credit if credit > 0 else width
 
@@ -585,6 +643,7 @@ def generate_signals(
                     risk_reward_ratio=round(credit / max_loss, 4) if max_loss > 0 and credit > 0 else None,
                     net_delta=round(sum(l.get("delta", 0) or 0 for l in legs), 4),
                     net_gamma=None, net_theta=None, net_vega=None,
+                    estimated_execution_cost=round(spread_cost, 2) if spread_cost > 0 else None,
                 ))
 
     # ── Signal 3: Term Structure Trade ──
@@ -657,6 +716,11 @@ def generate_signals(
                     )
                     if target_calls:
                         tc = target_calls[0]
+                        tc_legs = [{"action": "BUY", "contract": tc.contract.ticker, "type": "call",
+                                   "strike": tc.contract.strike_price, "expiry": tc.contract.expiration_date,
+                                   "delta": tc.delta, "iv": tc.implied_volatility, "mid": tc.mid_price}]
+                        tc_spread = sum(_compute_leg_spread_cost(l) for l in tc_legs) * 100
+                        tc_debit = (tc.mid_price or 0) * 100 + tc_spread
                         signals.append(TradeSignal(
                             signal_type="mean_reversion",
                             direction="buy_premium",
@@ -664,14 +728,13 @@ def generate_signals(
                             strategy="Long Call (target HVN)",
                             description=f"Price at ${spot:.2f} is {distance:.1%} below HVN at ${hvn.mean:.2f} (weight: {hvn.weight:.1%}). High probability of reversion.",
                             rationale=f"The volume-weighted distribution shows a High Volume Node (HVN) at ${hvn.mean:.2f} attracting {hvn.weight:.1%} of traded volume. Price tends to gravitate toward HVNs. Buy calls targeting this level.",
-                            legs=[{"action": "BUY", "contract": tc.contract.ticker, "type": "call",
-                                   "strike": tc.contract.strike_price, "expiry": tc.contract.expiration_date,
-                                   "delta": tc.delta, "iv": tc.implied_volatility, "mid": tc.mid_price}],
-                            max_loss=round(-(tc.mid_price or 0) * 100, 2),
+                            legs=tc_legs,
+                            max_loss=round(-tc_debit, 2),
                             net_delta=round(tc.delta or 0, 4),
                             net_gamma=round(tc.gamma or 0, 6) if tc.gamma else None,
                             net_theta=round(tc.theta or 0, 4) if tc.theta else None,
                             net_vega=round(tc.vega or 0, 4) if tc.vega else None,
+                            estimated_execution_cost=round(tc_spread, 2) if tc_spread > 0 else None,
                         ))
                 else:
                     target_puts = sorted(
@@ -684,6 +747,11 @@ def generate_signals(
                     )
                     if target_puts:
                         tp = target_puts[0]
+                        tp_legs = [{"action": "BUY", "contract": tp.contract.ticker, "type": "put",
+                                   "strike": tp.contract.strike_price, "expiry": tp.contract.expiration_date,
+                                   "delta": tp.delta, "iv": tp.implied_volatility, "mid": tp.mid_price}]
+                        tp_spread = sum(_compute_leg_spread_cost(l) for l in tp_legs) * 100
+                        tp_debit = (tp.mid_price or 0) * 100 + tp_spread
                         signals.append(TradeSignal(
                             signal_type="mean_reversion",
                             direction="buy_premium",
@@ -691,14 +759,13 @@ def generate_signals(
                             strategy="Long Put (target HVN)",
                             description=f"Price at ${spot:.2f} is {distance:.1%} above HVN at ${hvn.mean:.2f} (weight: {hvn.weight:.1%}). High probability of reversion.",
                             rationale=f"The volume-weighted distribution shows a High Volume Node (HVN) at ${hvn.mean:.2f} attracting {hvn.weight:.1%} of traded volume. Price tends to gravitate toward HVNs. Buy puts targeting this level.",
-                            legs=[{"action": "BUY", "contract": tp.contract.ticker, "type": "put",
-                                   "strike": tp.contract.strike_price, "expiry": tp.contract.expiration_date,
-                                   "delta": tp.delta, "iv": tp.implied_volatility, "mid": tp.mid_price}],
-                            max_loss=round(-(tp.mid_price or 0) * 100, 2),
+                            legs=tp_legs,
+                            max_loss=round(-tp_debit, 2),
                             net_delta=round(tp.delta or 0, 4),
                             net_gamma=round(tp.gamma or 0, 6) if tp.gamma else None,
                             net_theta=round(tp.theta or 0, 4) if tp.theta else None,
                             net_vega=round(tp.vega or 0, 4) if tp.vega else None,
+                            estimated_execution_cost=round(tp_spread, 2) if tp_spread > 0 else None,
                         ))
 
     # ── Signal 5: Gamma Scalp (multi-modal GMM) ──
@@ -726,7 +793,16 @@ def generate_signals(
                     atm_straddle_puts.sort(key=lambda c: abs(c.moneyness - 1.0))
                     sc = atm_straddle_calls[0]
                     sp = atm_straddle_puts[0]
-                    total_debit = ((sc.mid_price or 0) + (sp.mid_price or 0)) * 100
+                    straddle_legs = [
+                        {"action": "BUY", "contract": sc.contract.ticker, "type": "call",
+                         "strike": sc.contract.strike_price, "expiry": sc.contract.expiration_date,
+                         "delta": sc.delta, "iv": sc.implied_volatility, "mid": sc.mid_price},
+                        {"action": "BUY", "contract": sp.contract.ticker, "type": "put",
+                         "strike": sp.contract.strike_price, "expiry": sp.contract.expiration_date,
+                         "delta": sp.delta, "iv": sp.implied_volatility, "mid": sp.mid_price},
+                    ]
+                    straddle_spread = sum(_compute_leg_spread_cost(l) for l in straddle_legs) * 100
+                    total_debit = ((sc.mid_price or 0) + (sp.mid_price or 0)) * 100 + straddle_spread
 
                     signals.append(TradeSignal(
                         signal_type="gamma_scalp",
@@ -735,19 +811,13 @@ def generate_signals(
                         strategy="Long Straddle + Delta Hedge",
                         description=f"GMM shows {len(modes)} significant price modes spanning {pct_range:.1%}. Price likely to oscillate between ${modes[0]:.2f} and ${modes[-1]:.2f}.",
                         rationale=f"Multi-modal distribution (n={gmm.n_components}) indicates price will move between distinct regimes rather than trending. Buy gamma via straddle and scalp delta as price oscillates between nodes. Each oscillation generates realized P&L that should exceed theta decay.",
-                        legs=[
-                            {"action": "BUY", "contract": sc.contract.ticker, "type": "call",
-                             "strike": sc.contract.strike_price, "expiry": sc.contract.expiration_date,
-                             "delta": sc.delta, "iv": sc.implied_volatility, "mid": sc.mid_price},
-                            {"action": "BUY", "contract": sp.contract.ticker, "type": "put",
-                             "strike": sp.contract.strike_price, "expiry": sp.contract.expiration_date,
-                             "delta": sp.delta, "iv": sp.implied_volatility, "mid": sp.mid_price},
-                        ],
+                        legs=straddle_legs,
                         max_loss=round(-total_debit, 2),
                         net_delta=round((sc.delta or 0) + (sp.delta or 0), 4),
                         net_gamma=round((sc.gamma or 0) + (sp.gamma or 0), 6),
                         net_theta=round((sc.theta or 0) + (sp.theta or 0), 4),
                         net_vega=round((sc.vega or 0) + (sp.vega or 0), 4),
+                        estimated_execution_cost=round(straddle_spread, 2) if straddle_spread > 0 else None,
                     ))
 
     return signals

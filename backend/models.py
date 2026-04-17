@@ -160,6 +160,7 @@ class VolatilityAnalysis(BaseModel):
     realized_vol_20d: Optional[float] = None
     realized_vol_30d: Optional[float] = None
     realized_vol_60d: Optional[float] = None
+    parkinson_vol_20d: Optional[float] = None
     # GMM-enhanced realized vol
     gmm_weighted_vol: Optional[float] = None
     gmm_weighted_kurtosis: Optional[float] = None
@@ -176,6 +177,9 @@ class VolatilityAnalysis(BaseModel):
     surface_points: List[VolSurfacePoint] = []
     # Full chain with greeks
     chain: List[OptionContractWithGreeks] = []
+    # BKM risk-neutral moments (model-free, from OTM option prices)
+    rn_bkm_30d: Optional[Dict[str, Any]] = None
+    rn_bkm_60d: Optional[Dict[str, Any]] = None
 
 
 class TradeSignal(BaseModel):
@@ -199,6 +203,8 @@ class TradeSignal(BaseModel):
     net_gamma: Optional[float] = None
     net_theta: Optional[float] = None
     net_vega: Optional[float] = None
+    # Transaction costs
+    estimated_execution_cost: Optional[float] = None  # total spread cost per contract
 
 
 class VolatilityResponse(BaseModel):

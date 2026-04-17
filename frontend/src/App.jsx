@@ -18,6 +18,7 @@ import ComparePanel from './components/ComparePanel'
 import SensitivityPanel from './components/SensitivityPanel'
 import WfoPanel from './components/WfoPanel'
 import LibraryPanel from './components/LibraryPanel'
+import BKMPanel from './components/BKMPanel'
 
 const H = 340
 
@@ -287,6 +288,7 @@ export default function App() {
     { id: 'charts', label: 'CHARTS', icon: '▤' },
     { id: 'profile', label: 'PROFILE', icon: '▥' },
     { id: 'volatility', label: 'VOL', icon: '◈', accent: true },
+    { id: 'bkm', label: 'BKM', icon: '📐', accent: true },
     { id: 'signals', label: 'SIGNALS', icon: '⚡', accent: true },
     { id: 'results', label: 'DATA', icon: '≡' },
     { id: 'moments', label: 'MOMENTS', icon: '📈' },
@@ -449,6 +451,16 @@ export default function App() {
                     <div style={S.placeholderIcon}>◈</div>
                     <div style={S.placeholderTitle}>Run Vol Analysis</div>
                     <div style={S.placeholderSub}>Click "◈ Run Vol Analysis" in the sidebar to compute IV surface, greeks, and trade signals</div>
+                  </div>
+              )}
+
+              {activeTab === 'bkm' && (
+                volData
+                  ? <BKMPanel volData={volData} analysis={analysis} />
+                  : <div style={S.placeholder}>
+                    <div style={S.placeholderIcon}>📐</div>
+                    <div style={S.placeholderTitle}>Run Vol Analysis</div>
+                    <div style={S.placeholderSub}>BKM model-free risk-neutral moments require option chain data</div>
                   </div>
               )}
 
